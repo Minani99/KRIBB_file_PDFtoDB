@@ -261,11 +261,13 @@ class GovernmentPDFExtractor:
         """샘플 데이터 생성 (PDF 없을 때)"""
         logger.info("샘플 데이터 생성 중...")
         
+        current_year = datetime.now().year
+
         return {
             "metadata": {
                 "source_file": "sample_data.pdf",
                 "extraction_date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                "document_year": 2024,
+                "document_year": current_year,
                 "total_pages": 12
             },
             "pages": [
@@ -344,9 +346,9 @@ class GovernmentPDFExtractor:
                             "category": "plan",
                             "data": [
                                 ["연도", "총예산", "정부", "민간", "지방비"],
-                                ["2023(실적)", "45,200", "35,000", "8,200", "2,000"],
-                                ["2024(계획)", "52,300", "40,000", "10,300", "2,000"],
-                                ["2025(계획)", "58,500", "44,000", "12,500", "2,000"]
+                                [f"{current_year-1}(실적)", "45,200", "35,000", "8,200", "2,000"],
+                                [f"{current_year}(계획)", "52,300", "40,000", "10,300", "2,000"],
+                                [f"{current_year+1}(계획)", "58,500", "44,000", "12,500", "2,000"]
                             ]
                         }
                     ]

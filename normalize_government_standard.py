@@ -27,6 +27,17 @@ class GovernmentStandardNormalizer:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
 
+        # 파일명에서 연도 추출 (예: "2024년도 생명공학육성시행계획.json" -> 2024)
+        document_year = 2024  # 기본값
+        filename = self.json_path.stem  # 확장자 제외한 파일명
+
+        import re
+        year_match = re.search(r'(20\d{2})', filename)
+        if year_match:
+            document_year = int(year_match.group(1))
+
+        logger.info(f"📅 문서 연도 추출: {filename} -> {document_year}년")
+
         # ID 카운터
         self.id_counters = {
             'sub_project': 1,
@@ -61,9 +72,9 @@ class GovernmentStandardNormalizer:
         # 컨텍스트
         self.current_context = {
             'sub_project_id': None,
-            'document_year': 2024,
-            'performance_year': 2023,
-            'plan_year': 2024
+            'document_year': document_year,
+            'performance_year': document_year - 1,  # 성과는 전년도
+            'plan_year': document_year  # 계획은 당해년도
         }
 
         # 검증 통계
@@ -135,9 +146,9 @@ class GovernmentStandardNormalizer:
         # "① 주요 추진계획 내용" 섹션 찾기
         match = re.search(r'①\s*주요\s*추진계획\s*내용(.*?)(?:②|③|\(2\)|\(3\)|$)', full_text, re.DOTALL)
 
-        # 패턴1이 없으면 "(3) 2024년도 추진계획" 섹션에서 ① 이후 내용 찾기
+        # 패턴1이 없으면 "(3) 년도 추진계획" 섹션에서 ① 이후 내용 찾기 (연도 무관)
         if not match:
-            match = re.search(r'\(3\)\s*2024년도\s*추진계획\s*①\s*(.*?)(?:②|③|$)', full_text, re.DOTALL)
+            match = re.search(r'\(3\)\s*\d{4}년도\s*추진계획\s*①\s*(.*?)(?:②|③|$)', full_text, re.DOTALL)
 
         if not match:
             return []
@@ -237,6 +248,7 @@ class GovernmentStandardNormalizer:
                         'id': self._get_next_id('schedule'),
                         'sub_project_id': self.current_context['sub_project_id'],
                         'raw_data_id': raw_data_id,
+                        'document_year': self.current_context['document_year'],
                         'year': year,
                         'quarter': quarter,
                         'month_start': (quarter - 1) * 3 + 1,
@@ -254,6 +266,7 @@ class GovernmentStandardNormalizer:
                     'id': self._get_next_id('schedule'),
                     'sub_project_id': self.current_context['sub_project_id'],
                     'raw_data_id': raw_data_id,
+                    'document_year': self.current_context['document_year'],
                     'year': year,
                     'quarter': 0,
                     'month_start': 1,
@@ -301,6 +314,7 @@ class GovernmentStandardNormalizer:
                                         'id': self._get_next_id('performance'),
                                         'sub_project_id': self.current_context['sub_project_id'],
                                         'raw_data_id': raw_data_id,
+                                        'document_year': self.current_context['document_year'],
                                         'performance_year': year,
                                         'indicator_category': '특허',
                                         'indicator_type': indicator_type,
@@ -327,6 +341,7 @@ class GovernmentStandardNormalizer:
                                         'id': self._get_next_id('performance'),
                                         'sub_project_id': self.current_context['sub_project_id'],
                                         'raw_data_id': raw_data_id,
+                                        'document_year': self.current_context['document_year'],
                                         'performance_year': year,
                                         'indicator_category': '논문',
                                         'indicator_type': indicator_type,
@@ -352,6 +367,7 @@ class GovernmentStandardNormalizer:
                                     'id': self._get_next_id('performance'),
                                     'sub_project_id': self.current_context['sub_project_id'],
                                     'raw_data_id': raw_data_id,
+                                    'document_year': self.current_context['document_year'],
                                     'performance_year': year,
                                     'indicator_category': '기술이전',
                                     'indicator_type': '기술지도',
@@ -372,6 +388,7 @@ class GovernmentStandardNormalizer:
                                     'id': self._get_next_id('performance'),
                                     'sub_project_id': self.current_context['sub_project_id'],
                                     'raw_data_id': raw_data_id,
+                                    'document_year': self.current_context['document_year'],
                                     'performance_year': year,
                                     'indicator_category': '기술이전',
                                     'indicator_type': '기술이전',
@@ -392,6 +409,7 @@ class GovernmentStandardNormalizer:
                                     'id': self._get_next_id('performance'),
                                     'sub_project_id': self.current_context['sub_project_id'],
                                     'raw_data_id': raw_data_id,
+                                    'document_year': self.current_context['document_year'],
                                     'performance_year': year,
                                     'indicator_category': '기술이전',
                                     'indicator_type': '기술료',
@@ -417,6 +435,7 @@ class GovernmentStandardNormalizer:
                                     'id': self._get_next_id('performance'),
                                     'sub_project_id': self.current_context['sub_project_id'],
                                     'raw_data_id': raw_data_id,
+                                    'document_year': self.current_context['document_year'],
                                     'performance_year': year,
                                     'indicator_category': '국제협력',
                                     'indicator_type': '해외연구자유치',
@@ -437,6 +456,7 @@ class GovernmentStandardNormalizer:
                                     'id': self._get_next_id('performance'),
                                     'sub_project_id': self.current_context['sub_project_id'],
                                     'raw_data_id': raw_data_id,
+                                    'document_year': self.current_context['document_year'],
                                     'performance_year': year,
                                     'indicator_category': '국제협력',
                                     'indicator_type': '국내연구자파견',
@@ -457,6 +477,7 @@ class GovernmentStandardNormalizer:
                                     'id': self._get_next_id('performance'),
                                     'sub_project_id': self.current_context['sub_project_id'],
                                     'raw_data_id': raw_data_id,
+                                    'document_year': self.current_context['document_year'],
                                     'performance_year': year,
                                     'indicator_category': '국제협력',
                                     'indicator_type': '국제학술회의개최',
@@ -482,6 +503,7 @@ class GovernmentStandardNormalizer:
                                     'id': self._get_next_id('performance'),
                                     'sub_project_id': self.current_context['sub_project_id'],
                                     'raw_data_id': raw_data_id,
+                                    'document_year': self.current_context['document_year'],
                                     'performance_year': year,
                                     'indicator_category': '인력양성',
                                     'indicator_type': '박사배출',
@@ -502,6 +524,7 @@ class GovernmentStandardNormalizer:
                                     'id': self._get_next_id('performance'),
                                     'sub_project_id': self.current_context['sub_project_id'],
                                     'raw_data_id': raw_data_id,
+                                    'document_year': self.current_context['document_year'],
                                     'performance_year': year,
                                     'indicator_category': '인력양성',
                                     'indicator_type': '석사배출',
@@ -522,6 +545,7 @@ class GovernmentStandardNormalizer:
                                     'id': self._get_next_id('performance'),
                                     'sub_project_id': self.current_context['sub_project_id'],
                                     'raw_data_id': raw_data_id,
+                                    'document_year': self.current_context['document_year'],
                                     'performance_year': year,
                                     'indicator_category': '인력양성',
                                     'indicator_type': '연구과제참여인력',
@@ -534,50 +558,78 @@ class GovernmentStandardNormalizer:
         return normalized
 
     def _normalize_budget_data(self, rows: List[List], raw_data_id: int) -> List[Dict]:
-        """예산 데이터 정규화 - 연도별/유형별 분리"""
+        """예산 데이터 정규화 - 셀 내부 줄바꿈 처리 (완전 개선 버전)"""
         normalized = []
 
         if not rows or len(rows) < 2:
             return []
 
-        # 헤더 찾기 - 연도와 타입 매핑
-        header_row = None
+        # 1단계: 첫 행에서 연도 정보 추출 (셀 내부 줄바꿈 고려)
         year_columns = {}  # {컬럼 인덱스: (연도, 실적/계획)}
 
-        for row in rows:
-            row_text = ' '.join(str(c) for c in row).lower()
-            # "사업비 구분" 같은 헤더 행 찾기
-            if '사업비' in row_text or ('구분' in row_text and '20' in row_text):
-                # 헤더 행 발견 - 각 컬럼에서 연도 추출
-                for idx, cell in enumerate(row):
-                    cell_str = str(cell).strip()
-                    # 연도 찾기 (2021년 실적, 2024년 계획 등)
-                    year_match = re.search(r'(20\d{2})', cell_str)
-                    if year_match:
-                        year = int(year_match.group(1))
-                        is_actual = '실적' in cell_str
-                        year_columns[idx] = (year, '실적' if is_actual else '계획')
-                header_row = row
-                break
+        first_row = rows[0]
+        for col_idx, cell in enumerate(first_row):
+            cell_str = str(cell).strip()
 
-        if not header_row or not year_columns:
+            # 셀 내부에 줄바꿈이 있는 경우: "2020년\n실적" 형태
+            lines = cell_str.split('\n')
+
+            year = None
+            category = '계획'  # 기본값
+
+            for line in lines:
+                line = line.strip()
+                # 연도 찾기
+                year_match = re.search(r'(20\d{2})', line)
+                if year_match:
+                    year = int(year_match.group(1))
+
+                # 실적/계획 판단
+                if '실적' in line:
+                    category = '실적'
+                elif '계획' in line:
+                    category = '계획'
+
+            if year:
+                year_columns[col_idx] = (year, category)
+
+        if not year_columns:
             return []
 
-        # 데이터 행 처리
-        for row in rows:
-            # 헤더 행 건너뛰기
-            if row == header_row:
-                continue
-
+        # 2단계: 데이터 행 처리 (첫 행 이후)
+        for row_idx, row in enumerate(rows[1:], 1):
             # 빈 행 건너뛰기
             if not any(cell for cell in row if cell and str(cell).strip()):
                 continue
 
-            # 첫 번째 컬럼에서 예산 타입 추출
-            budget_type_text = str(row[0]).strip().lower()
+            # "사업비\n구 분" 컬럼(보통 3번째 컬럼)에서 예산 타입 추출
+            # 테이블 구조: [사업명, 사업기간, 구분, 2020년, 2021년, ...]
+            budget_type_col_idx = -1
 
-            # "소계", "합계" 건너뛰기
-            if any(skip in budget_type_text for skip in ['소계', '합계', '총계', '구분']):
+            # "구분" 또는 "사업비" 컬럼 찾기
+            for idx, cell in enumerate(first_row):
+                cell_lower = str(cell).lower()
+                if '구 분' in cell_lower or '구분' in cell_lower or '사업비' in cell_lower:
+                    budget_type_col_idx = idx
+                    break
+
+            # 기본값: 3번째 컬럼 (인덱스 2)
+            if budget_type_col_idx == -1:
+                budget_type_col_idx = 2
+
+            # 예산 타입 추출
+            if budget_type_col_idx >= len(row):
+                continue
+
+            budget_type_text = str(row[budget_type_col_idx]).strip().lower()
+
+            # 스킵 키워드 체크
+            skip_keywords = ['소계', '합계', '총계', '사업명', '사업기간', '구분', '사업비']
+            if any(skip in budget_type_text for skip in skip_keywords):
+                continue
+
+            # 빈 셀 건너뛰기
+            if not budget_type_text or budget_type_text in ['-', '']:
                 continue
 
             # 예산 타입 결정
@@ -586,13 +638,13 @@ class GovernmentStandardNormalizer:
                 budget_type = '정부'
             elif '민간' in budget_type_text:
                 budget_type = '민간'
-            elif '지방' in budget_type_text:
+            elif '지방' in budget_type_text or '지자체' in budget_type_text:
                 budget_type = '지방비'
             else:
                 # 알 수 없는 타입은 건너뛰기
                 continue
 
-            # 각 연도 컬럼 처리
+            # 3단계: 각 연도 컬럼의 금액 추출
             for col_idx, (year, category) in year_columns.items():
                 if col_idx >= len(row):
                     continue
@@ -604,28 +656,41 @@ class GovernmentStandardNormalizer:
                     continue
 
                 try:
-                    amount = float(cell_str.replace(',', '').replace('백만원', '').strip())
+                    # 숫자 추출 (쉼표, 단위 제거)
+                    amount_str = cell_str.replace(',', '').replace('백만원', '').replace('억원', '').strip()
+
+                    # 줄바꿈이 있을 수 있으니 첫 번째 라인만
+                    amount_str = amount_str.split('\n')[0].strip()
+
+                    if not amount_str or amount_str == '0':
+                        continue
+
+                    amount = float(amount_str)
+
                     if amount <= 0:
                         continue
 
-                    # 실적/계획 구분 (연도 기준)
-                    is_actual = year < self.current_context['plan_year'] or category == '실적'
+                    # 실적/계획 구분
+                    current_year = self.current_context.get('plan_year', self.current_context.get('document_year', datetime.now().year))
+                    is_actual = year < current_year or category == '실적'
 
                     record = {
                         'id': self._get_next_id('budget'),
                         'sub_project_id': self.current_context['sub_project_id'],
                         'raw_data_id': raw_data_id,
+                        'document_year': self.current_context['document_year'],
                         'budget_year': year,
                         'budget_category': category,
                         'budget_type': budget_type,
                         'amount': amount,
                         'currency': 'KRW',
                         'is_actual': is_actual,
-                        'original_text': str(row)
+                        'original_text': f"{budget_type}: {cell_str}"
                     }
                     normalized.append(record)
 
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as e:
+                    # 파싱 실패는 무시
                     continue
 
         return normalized
@@ -664,6 +729,7 @@ class GovernmentStandardNormalizer:
             'sub_project_id': self.current_context['sub_project_id'],
             'raw_data_id': raw_data_id,
             'overview_type': '사업개요',
+            'document_year': self.current_context['document_year'],
             'main_project': overview_data.get('세부사업명', ''),
             'sub_project': overview_data.get('내역사업명', ''),
             'field': overview_data.get('대표분야', ''),
@@ -739,7 +805,7 @@ class GovernmentStandardNormalizer:
 
             # 메타데이터에서 문서 연도 추출
             metadata = json_data.get('metadata', {})
-            self.current_context['document_year'] = metadata.get('document_year', 2024)
+            self.current_context['document_year'] = metadata.get('document_year', datetime.now().year)
             self.current_context['performance_year'] = self.current_context['document_year'] - 1
             self.current_context['plan_year'] = self.current_context['document_year']
 
@@ -800,7 +866,7 @@ class GovernmentStandardNormalizer:
                     # 주요 추진계획 추출 (여러 패턴 지원)
                     if ('① 주요 추진계획' in page_full_text or
                         '① 주요추진계획' in page_full_text or
-                        '(3) 2024년도 추진계획' in page_full_text):
+                        re.search(r'\(3\)\s*\d{4}년도\s*추진계획', page_full_text)):
                         plan_details = self._extract_plan_details(page_full_text, page_num)
                         self.data['plan_details'].extend(plan_details)
 

@@ -6,27 +6,32 @@
 
 # Database
 pymysql==1.1.2
+oracledb>=3.4.0
 
 # Data Processing
 pandas==2.2.3
 numpy>=2.0.0
 
-# Visualization  
+# Visualization
 matplotlib==3.10.3
 seaborn==0.13.2
 
 # Date/Time
 python-dateutil==2.9.0
 
-<<<<<<< HEAD
-# PDF Processing (Required for PDF extraction)
-pdfplumber==0.10.3
-
-# Optional Dependencies
-# =====================
-# PyPDF2==3.0.1  # Alternative PDF processor
-=======
 # PDF Processing
 pdfplumber==0.10.3
 PyPDF2==3.0.1
->>>>>>> 32106076abc4cdf8ba59ca0773c34a44fb21a5ca
+
+# Batch Processing & Progress
+# ===========================
+tqdm==4.67.0  # 진행률 표시
+
+# Web UI (Optional)
+# =================
+streamlit==1.40.2  # 웹 인터페이스
+plotly==5.24.1  # 인터랙티브 차트
+
+# Advanced PDF Processing (Optional)
+# ==================================
+# docling  # 고급 PDF 분석 (별도 설치 필요)

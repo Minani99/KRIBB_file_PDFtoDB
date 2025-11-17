@@ -27,6 +27,17 @@ MYSQL_CONFIG = {
 }
 
 
+# ==================== Oracle 데이터베이스 설정 ====================
+ORACLE_CONFIG = {
+    "host": "192.168.73.208",
+    "port": 1521,
+    "sid": "bics",
+    "user": "bics_dev",
+    "password": "bics_dev",
+    "charset": "UTF8"
+}
+
+
 # ==================== 테이블 정의 ====================
 # 테이블 생성 순서 (Foreign Key 의존성 고려)
 TABLE_ORDER = [

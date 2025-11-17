@@ -1,30 +1,37 @@
 #!/usr/bin/env python3
 """
-PDF to Database - 최종 통합 메인 프로그램
-정부/공공기관 표준 데이터 처리 시스템
+생명공학육성시행계획 데이터 처리 시스템 - 메인 프로그램
+PDF → JSON → 정규화 → Oracle DB 적재 파이프라인
 
 사용법:
-    python main.py                    # input 폴더의 모든 PDF 처리
-    python main.py document.pdf       # 특정 PDF 파일 처리
-    python main.py --sample           # 샘플 데이터로 테스트
+    python main.py --batch            # 전체 파이프라인 실행 (권장)
+    python main.py document.pdf       # 특정 PDF 파일만 처리
     python main.py --skip-db          # DB 적재 건너뛰기
+    python main.py --workers 8        # 병렬 처리 워커 수 지정
 """
 
-import os
 import sys
-import glob
 import json
 from pathlib import Path
 import logging
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List
 import argparse
 
-# 모듈 임포트
+# 핵심 모듈
 from extract_pdf_to_json import extract_pdf_to_json
 from normalize_government_standard import GovernmentStandardNormalizer
-from load_government_standard_db import GovernmentStandardDBLoader
-from config import MYSQL_CONFIG
+from load_oracle_db import OracleDBLoader
+from config import ORACLE_CONFIG
+
+# 배치 처리
+try:
+    from batch_processor import BatchPDFProcessor, create_pdf_processor_func
+    BATCH_AVAILABLE = True
+except ImportError:
+    BATCH_AVAILABLE = False
+    BatchPDFProcessor = None
+    create_pdf_processor_func = None
 
 # 로깅 설정
 logging.basicConfig(
@@ -35,16 +42,24 @@ logger = logging.getLogger(__name__)
 
 
 class PDFtoDBPipeline:
-    """PDF to Database 완전한 파이프라인"""
     
-    def __init__(self, skip_db: bool = False, use_sample: bool = False):
+    def __init__(self,
+                 skip_db: bool = False,
+                 batch_mode: bool = False,
+                 batch_size: int = 10,
+                 max_workers: int = 4
+                 ):
         """
         Args:
             skip_db: DB 적재 건너뛰기
-            use_sample: 샘플 데이터 사용
+            batch_mode: 배치 처리 모드
+            batch_size: 배치당 파일 수
+            max_workers: 병렬 작업자 수
         """
         self.skip_db = skip_db
-        self.use_sample = use_sample
+        self.batch_mode = batch_mode
+        self.batch_size = batch_size
+        self.max_workers = max_workers
         
         # 디렉토리 설정
         self.input_dir = Path("input")
@@ -67,7 +82,7 @@ class PDFtoDBPipeline:
         }
     
     def clean_previous_data(self):
-        """이전 실행 데이터 모두 삭제"""
+        """이전 실행 데이터 정리 (JSON, CSV)"""
         logger.info("\n" + "="*80)
         logger.info("🧹 이전 데이터 정리 중...")
         logger.info("="*80)
@@ -93,53 +108,6 @@ class PDFtoDBPipeline:
                     cleaned_items.append(f"CSV: {file.name}")
                 except Exception as e:
                     logger.warning(f"파일 삭제 실패 {file}: {e}")
-
-        # 3. DB 테이블 초기화 (skip_db가 아닐 경우)
-        if not self.skip_db:
-            try:
-                import pymysql
-                db_config = MYSQL_CONFIG.copy()
-
-                # 먼저 데이터베이스 연결 (특정 DB 없이)
-                conn = pymysql.connect(
-                    host=db_config['host'],
-                    user=db_config['user'],
-                    password=db_config['password'],
-                    port=db_config.get('port', 3306)
-                )
-                cursor = conn.cursor()
-
-                # 데이터베이스가 존재하는지 확인
-                cursor.execute("SHOW DATABASES LIKE 'government_standard'")
-                db_exists = cursor.fetchone()
-
-                if db_exists:
-                    cursor.execute("USE government_standard")
-
-                    # 모든 테이블 목록 가져오기
-                    cursor.execute("SHOW TABLES")
-                    tables = cursor.fetchall()
-
-                    # 외래 키 제약 조건 비활성화
-                    cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
-
-                    # 각 테이블 삭제
-                    for (table_name,) in tables:
-                        cursor.execute(f"DROP TABLE IF EXISTS `{table_name}`")
-                        cleaned_items.append(f"DB 테이블: {table_name}")
-
-                    # 외래 키 제약 조건 다시 활성화
-                    cursor.execute("SET FOREIGN_KEY_CHECKS = 1")
-                    conn.commit()
-                    logger.info("✅ 데이터베이스 테이블 초기화 완료")
-                else:
-                    logger.info("ℹ️  데이터베이스가 존재하지 않습니다 (생성됨)")
-
-                cursor.close()
-                conn.close()
-
-            except Exception as e:
-                logger.warning(f"DB 초기화 실패 (무시하고 계속): {e}")
 
         # 결과 출력
         if cleaned_items:
@@ -233,41 +201,150 @@ class PDFtoDBPipeline:
             logger.error(f"샘플 처리 실패: {e}")
             return False
     
-    def load_to_database(self) -> bool:
-        """3단계: 데이터베이스 적재"""
-        if self.skip_db:
-            logger.info("\n⏭️ DB 적재 건너뜀")
-            return True
+    def process_batch_mode(self, pdf_files: List[str] = None) -> bool:
+        """대량 배치 처리 모드"""
+        if not BATCH_AVAILABLE:
+            logger.error("배치 처리 모듈을 사용할 수 없습니다. batch_processor.py를 확인하세요.")
+            return False
         
         try:
             logger.info("\n" + "="*60)
-            logger.info("3️⃣ 데이터베이스 적재")
+            logger.info("🚀 대량 배치 처리 모드")
             logger.info("="*60)
             
-            # DB 설정
-            db_config = MYSQL_CONFIG.copy()
-            db_config['database'] = 'government_standard'
+            # 1. PDF → JSON (배치 처리)
+            logger.info("1️⃣ PDF → JSON 변환 (병렬 처리)")
             
-            # 적재
-            loader = GovernmentStandardDBLoader(db_config, str(self.normalized_dir))
-            loader.connect()
-            loader.drop_existing_tables()
-            loader.create_tables()
-            loader.load_all_tables()
+            processor = BatchPDFProcessor(
+                input_dir=str(self.input_dir),
+                output_dir=str(self.output_dir),
+                batch_size=self.batch_size,
+                max_workers=self.max_workers,
+                use_multiprocessing=False  # 멀티스레딩 사용 (안정성)
+            )
             
-            # 검증
-            verification = loader.verify_data_integrity()
-            loader.close()
+            pdf_processor_func = create_pdf_processor_func(str(self.output_dir))
             
-            self.stats['db_loaded'] = True
-            logger.info(f"   ✅ DB 적재 완료: {loader.load_stats['total_records']:,}건")
+            summary = processor.process_all(
+                pdf_processor_func,
+                recursive=False,
+                save_results=True
+            )
             
+            processor.print_summary()
+            
+            if summary['processed'] == 0:
+                logger.error("처리된 파일이 없습니다.")
+                return False
+            
+            # 통계 업데이트
+            self.stats['processed'] = summary['processed']
+            self.stats['failed'] = summary['failed']
+            
+            # 2. JSON → 정규화 (모든 파일 누적)
+            logger.info("\n2️⃣ 데이터 정규화")
+            
+            json_files = list(self.output_dir.glob("*.json"))
+            json_files = [f for f in json_files if not f.name.startswith('batch_')]
+            
+            logger.info(f"정규화할 JSON 파일: {len(json_files)}개")
+            
+            # 전체 JSON 데이터 수집
+            all_json_data = []
+            for i, json_file in enumerate(json_files, 1):
+                if i % 50 == 0:
+                    logger.info(f"  JSON 로드 중: [{i}/{len(json_files)}]")
+
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        json_data = json.load(f)
+                        all_json_data.append(json_data)
+                except Exception as e:
+                    logger.error(f"JSON 로드 실패 {json_file.name}: {e}")
+
+            logger.info(f"✅ {len(all_json_data)}개 JSON 로드 완료")
+
+            # 모든 데이터를 한 번에 정규화 (파일별로 연도 추출)
+            if all_json_data:
+                logger.info("모든 데이터 통합 정규화 시작...")
+
+                # 첫 번째 파일로 normalizer 초기화
+                normalizer = GovernmentStandardNormalizer(
+                    str(json_files[0]),
+                    str(self.normalized_dir)
+                )
+
+                # 각 JSON 파일별로 처리 (연도 추출 포함)
+                for json_file, json_data in zip(json_files, all_json_data):
+                    # 파일마다 연도를 추출하여 컨텍스트 업데이트
+                    import re
+                    filename = json_file.stem
+                    year_match = re.search(r'(20\d{2})', filename)
+
+                    if year_match:
+                        doc_year = int(year_match.group(1))
+                        logger.info(f"📅 {filename} -> {doc_year}년도 데이터 처리 중...")
+
+                        # 연도별로 컨텍스트 업데이트
+                        normalizer.current_context['document_year'] = doc_year
+                        normalizer.current_context['performance_year'] = doc_year - 1
+                        normalizer.current_context['plan_year'] = doc_year
+
+                    normalizer.normalize(json_data)
+
+                # 한 번에 CSV 저장
+                normalizer.save_to_csv()
+                normalizer.print_statistics()
+
+                # 통계
+                for table_name, records in normalizer.data.items():
+                    if isinstance(records, list):
+                        self.stats['total_records'] += len(records)
+
+                logger.info(f"✅ 정규화 완료: 총 {self.stats['total_records']:,}건")
+            else:
+                logger.error("정규화할 데이터가 없습니다.")
+                return False
+
             return True
             
         except Exception as e:
-            logger.error(f"DB 적재 실패: {e}")
+            logger.error(f"배치 처리 실패: {e}")
             return False
     
+    def load_to_database(self) -> bool:
+        """3단계: Oracle 데이터베이스 적재"""
+        if self.skip_db:
+            logger.info("\n⏭️ DB 적재 건너뜀")
+            return True
+
+        try:
+            logger.info("\n" + "="*60)
+            logger.info("3️⃣ Oracle 데이터베이스 적재")
+            logger.info("="*60)
+
+            # Oracle 적재
+            oracle_loader = OracleDBLoader(ORACLE_CONFIG, str(self.normalized_dir))
+            oracle_loader.connect()
+
+            # 테이블 생성 (존재하지 않을 경우)
+            oracle_loader.create_tables()
+
+            # 데이터 적재
+            oracle_loader.load_all_tables()
+
+            oracle_loader.close()
+
+            self.stats['db_loaded'] = True
+            logger.info(f"   ✅ Oracle DB 적재 완료: {oracle_loader.load_stats['total_records']:,}건")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Oracle DB 적재 실패: {e}")
+            logger.warning("⚠️ Oracle 적재 실패했지만 계속 진행합니다.")
+            return False
+
     def generate_report(self):
         """최종 보고서 생성"""
         report = []
@@ -325,13 +402,11 @@ class PDFtoDBPipeline:
         success = False
         
         try:
-            # 샘플 모드
-            if self.use_sample:
-                success = self.process_sample()
-                self.stats['processed'] = 1 if success else 0
-                self.stats['failed'] = 0 if success else 1
+            # 배치 처리 모드
+            if self.batch_mode:
+                success = self.process_batch_mode(pdf_files)
             
-            # PDF 처리 모드
+            # 일반 PDF 처리 모드
             else:
                 # PDF 파일 찾기
                 if pdf_files:
@@ -359,7 +434,7 @@ class PDFtoDBPipeline:
             # DB 적재
             if success and not self.skip_db:
                 self.load_to_database()
-            
+
             # 보고서 생성
             report_file = self.generate_report()
             logger.info(f"\n📄 보고서 생성: {report_file}")
@@ -382,16 +457,16 @@ class PDFtoDBPipeline:
 
 
 def main():
-    """메인 실행 함수"""
+    """메인 함수"""
     parser = argparse.ArgumentParser(
-        description="PDF to Database - 정부/공공기관 표준 데이터 처리",
+        description='생명공학육성시행계획 PDF 처리 시스템',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 예제:
-  python main.py                    # input 폴더의 모든 PDF 처리
-  python main.py doc1.pdf doc2.pdf  # 특정 PDF 파일들 처리
-  python main.py --sample           # 샘플 데이터로 테스트
+  python main.py --batch            # 전체 파이프라인 실행 (권장)
+  python main.py doc1.pdf           # 특정 PDF 파일 처리
   python main.py --skip-db          # DB 적재 건너뛰기
+  python main.py --workers 8        # 병렬 처리 워커 수 지정
         """
     )
     
@@ -402,23 +477,45 @@ def main():
     )
     
     parser.add_argument(
-        '--sample',
-        action='store_true',
-        help='샘플 데이터 모드로 실행'
-    )
-    
-    parser.add_argument(
         '--skip-db',
         action='store_true',
         help='데이터베이스 적재 건너뛰기'
     )
     
+    parser.add_argument(
+        '--batch',
+        action='store_true',
+        help='배치 처리 모드 (병렬 처리)'
+    )
+    
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=10,
+        help='배치당 파일 수 (기본값: 10)'
+    )
+    
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=4,
+        help='병렬 작업자 수 (기본값: 4)'
+    )
+    
     args = parser.parse_args()
+    
+    # 배치 모드 체크
+    if args.batch and not BATCH_AVAILABLE:
+        print("⚠️ 배치 처리 모듈을 사용할 수 없습니다.")
+        print("다음 패키지를 설치하세요: pip install tqdm")
+        return 1
     
     # 파이프라인 실행
     pipeline = PDFtoDBPipeline(
         skip_db=args.skip_db,
-        use_sample=args.sample
+        batch_mode=args.batch,
+        batch_size=args.batch_size,
+        max_workers=args.workers
     )
     
     success = pipeline.run(args.pdf_files)

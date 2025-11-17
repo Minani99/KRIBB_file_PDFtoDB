@@ -7,43 +7,38 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.egg
 
-# 가상환경
+# Virtual Environment
 .venv/
 venv/
 ENV/
+env/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
 
-# 백업 및 이전 버전
-backup_old_versions/
-cleanup_files.py
-
-# 출력 파일 (필요한 것만 제외)
-normalized_output_proper/
-normalized_output_improved/
-normalized_output_enterprise/
-
-# 입력 파일 (선택적)
-# input/*.pdf
-
-# 로그
-*.log
+# Project specific
+input/*.pdf
+output/*.json
+output/batch_*.json
+normalized_output_government/*.csv
+reports/*.txt
 
 # OS
 .DS_Store
 Thumbs.db
+*.log
 
-# 데이터베이스
+# Database
 *.db
 *.sqlite
 
-# 임시 파일
+# Temporary files
 *.tmp
 *.bak
-.deprecated_*
 
