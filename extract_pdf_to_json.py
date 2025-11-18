@@ -27,14 +27,24 @@ except ImportError:
 class GovernmentPDFExtractor:
     """정부 문서 PDF 추출 클래스"""
     
-    def __init__(self, pdf_path: str = None, output_dir: str = "output"):
+    def __init__(self, pdf_path: str = None, output_dir: str = None):
         """
         Args:
             pdf_path: 입력 PDF 파일 경로
-            output_dir: 출력 JSON 디렉토리 경로
+            output_dir: 출력 JSON 디렉토리 경로 (None이면 config.OUTPUT_DIR 사용)
         """
         self.pdf_path = Path(pdf_path) if pdf_path else None
-        self.output_dir = Path(output_dir)
+
+        # output_dir이 None이면 config에서 가져오기
+        if output_dir is None:
+            try:
+                from config import OUTPUT_DIR
+                self.output_dir = OUTPUT_DIR
+            except ImportError:
+                self.output_dir = Path("output")
+        else:
+            self.output_dir = Path(output_dir)
+
         self.output_dir.mkdir(exist_ok=True)
         
         # 카테고리 패턴
@@ -55,10 +65,14 @@ class GovernmentPDFExtractor:
     
     def extract(self) -> Dict[str, Any]:
         """PDF에서 데이터 추출"""
-        if not PDF_AVAILABLE or not self.pdf_path:
-            logger.info("Using sample data mode")
-            return self._generate_sample_data()
-        
+        if not PDF_AVAILABLE:
+            logger.error("pdfplumber가 설치되지 않았습니다. 'pip install pdfplumber' 실행하세요.")
+            raise ImportError("pdfplumber not installed")
+
+        if not self.pdf_path:
+            logger.error("PDF 파일 경로가 제공되지 않았습니다.")
+            raise ValueError("PDF path is required")
+
         try:
             logger.info(f"🚀 PDF 추출 시작: {self.pdf_path.name}")
             
@@ -93,8 +107,8 @@ class GovernmentPDFExtractor:
             
         except Exception as e:
             logger.error(f"PDF 추출 실패: {e}")
-            return self._generate_sample_data()
-    
+            raise
+
     def _process_page(self, page, page_num: int) -> Dict[str, Any]:
         """페이지 처리"""
         logger.info(f"📄 페이지 {page_num} 처리 중...")
@@ -257,105 +271,6 @@ class GovernmentPDFExtractor:
         except:
             return False
     
-    def _generate_sample_data(self) -> Dict[str, Any]:
-        """샘플 데이터 생성 (PDF 없을 때)"""
-        logger.info("샘플 데이터 생성 중...")
-        
-        current_year = datetime.now().year
-
-        return {
-            "metadata": {
-                "source_file": "sample_data.pdf",
-                "extraction_date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                "document_year": current_year,
-                "total_pages": 12
-            },
-            "pages": [
-                {
-                    "page_number": 1,
-                    "full_text": "1. 세부사업명: 바이오·의료기술개발\n내역사업명: 뇌연구",
-                    "category": None,
-                    "sub_project": "뇌연구",
-                    "tables": [{
-                        "table_number": 1,
-                        "category": None,
-                        "data": [
-                            ["항목", "내용"],
-                            ["세부사업명", "바이오·의료기술개발"],
-                            ["내역사업명", "뇌연구"],
-                            ["담당부처", "과학기술정보통신부"]
-                        ]
-                    }]
-                },
-                {
-                    "page_number": 2,
-                    "full_text": "(1) 사업개요",
-                    "category": "overview",
-                    "sub_project": "뇌연구",
-                    "tables": [{
-                        "table_number": 1,
-                        "category": "overview",
-                        "data": [
-                            ["구분", "내용"],
-                            ["사업목표", "뇌과학 원천기술 확보 및 뇌질환 극복"],
-                            ["주관기관", "한국뇌연구원"],
-                            ["사업내용", "뇌지도 구축, 뇌질환 진단/치료 기술 개발"]
-                        ]
-                    }]
-                },
-                {
-                    "page_number": 3,
-                    "full_text": "(2) 추진실적",
-                    "category": "performance",
-                    "sub_project": "뇌연구",
-                    "tables": [{
-                        "table_number": 1,
-                        "category": "performance",
-                        "data": [
-                            ["성과지표", "세부항목", "실적"],
-                            ["특허", "국내출원", "1,001"],
-                            ["특허", "국내등록", "125"],
-                            ["특허", "국외출원", "74"],
-                            ["특허", "국외등록", "10"],
-                            ["논문", "SCIE", "5,977"],
-                            ["논문", "IF10이상", "234"],
-                            ["인력양성", "박사", "156"],
-                            ["인력양성", "석사", "289"]
-                        ]
-                    }]
-                },
-                {
-                    "page_number": 4,
-                    "full_text": "(3) 추진계획",
-                    "category": "plan",
-                    "sub_project": "뇌연구",
-                    "tables": [
-                        {
-                            "table_number": 1,
-                            "category": "plan",
-                            "data": [
-                                ["추진일정", "과제명", "세부내용"],
-                                ["1/4분기~2/4분기", "뇌지도 구축", "고해상도 뇌영상 데이터 수집"],
-                                ["2/4분기~3/4분기", "AI 분석 플랫폼", "딥러닝 기반 뇌영상 분석 시스템 구축"],
-                                ["3/4분기~4/4분기", "임상 검증", "뇌질환 진단 정확도 검증"],
-                                ["연중", "인력 양성", "전문 연구인력 교육 프로그램 운영"]
-                            ]
-                        },
-                        {
-                            "table_number": 2,
-                            "category": "plan",
-                            "data": [
-                                ["연도", "총예산", "정부", "민간", "지방비"],
-                                [f"{current_year-1}(실적)", "45,200", "35,000", "8,200", "2,000"],
-                                [f"{current_year}(계획)", "52,300", "40,000", "10,300", "2,000"],
-                                [f"{current_year+1}(계획)", "58,500", "44,000", "12,500", "2,000"]
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }
-    
     def _print_statistics(self):
         """통계 출력"""
         logger.info(f"""
@@ -369,17 +284,28 @@ class GovernmentPDFExtractor:
         """)
 
 
-def extract_pdf_to_json(pdf_path: str = None, output_dir: str = "output") -> Dict[str, Any]:
+def extract_pdf_to_json(pdf_path: str, output_dir: str = None) -> Dict[str, Any]:
     """
     PDF를 JSON으로 변환하는 메인 함수
     
     Args:
-        pdf_path: PDF 파일 경로 (None이면 샘플 데이터 사용)
-        output_dir: 출력 디렉토리
-    
+        pdf_path: PDF 파일 경로 (필수)
+        output_dir: 출력 디렉토리 (None이면 config.OUTPUT_DIR 사용)
+
     Returns:
         추출된 JSON 데이터
     """
+    if not pdf_path:
+        raise ValueError("PDF 파일 경로가 필요합니다.")
+
+    # output_dir이 None이면 config에서 가져오기
+    if output_dir is None:
+        try:
+            from config import OUTPUT_DIR
+            output_dir = str(OUTPUT_DIR)
+        except ImportError:
+            output_dir = "output"
+
     extractor = GovernmentPDFExtractor(pdf_path, output_dir)
     return extractor.extract()
 
@@ -388,12 +314,12 @@ if __name__ == "__main__":
     # 테스트 실행
     import sys
     
-    if len(sys.argv) > 1:
-        pdf_file = sys.argv[1]
-        result = extract_pdf_to_json(pdf_file)
-    else:
-        # 샘플 데이터 모드
-        result = extract_pdf_to_json()
-    
+    if len(sys.argv) < 2:
+        print("사용법: python extract_pdf_to_json.py <PDF파일경로>")
+        sys.exit(1)
+
+    pdf_file = sys.argv[1]
+    result = extract_pdf_to_json(pdf_file)
+
     if result:
         print(f"\n✅ 추출 완료! 페이지: {len(result['pages'])}개")

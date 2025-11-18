@@ -21,8 +21,13 @@ import argparse
 # 핵심 모듈
 from extract_pdf_to_json import extract_pdf_to_json
 from normalize_government_standard import GovernmentStandardNormalizer
-from load_oracle_db import OracleDBLoader
-from config import ORACLE_CONFIG
+from load_oracle_direct import OracleDirectLoader
+from config import (
+    ORACLE_CONFIG,
+    INPUT_DIR,
+    OUTPUT_DIR,
+    NORMALIZED_OUTPUT_GOVERNMENT_DIR
+)
 
 # 배치 처리
 try:
@@ -61,16 +66,11 @@ class PDFtoDBPipeline:
         self.batch_size = batch_size
         self.max_workers = max_workers
         
-        # 디렉토리 설정
-        self.input_dir = Path("input")
-        self.output_dir = Path("output")
-        self.normalized_dir = Path("normalized_output_government")
-        self.report_dir = Path("reports")
-        
-        # 디렉토리 생성
-        for dir_path in [self.input_dir, self.output_dir, self.normalized_dir, self.report_dir]:
-            dir_path.mkdir(exist_ok=True)
-        
+        # 디렉토리 설정 (config에서 가져옴)
+        self.input_dir = INPUT_DIR
+        self.output_dir = OUTPUT_DIR
+        self.normalized_dir = NORMALIZED_OUTPUT_GOVERNMENT_DIR
+
         # 통계
         self.stats = {
             'start_time': datetime.now(),
@@ -167,40 +167,6 @@ class PDFtoDBPipeline:
             logger.error(f"처리 실패: {e}")
             return False
     
-    def process_sample(self) -> bool:
-        """샘플 데이터 처리"""
-        try:
-            logger.info("\n" + "="*60)
-            logger.info("🧪 샘플 데이터 모드")
-            logger.info("="*60)
-            
-            # 1. 샘플 JSON 생성
-            logger.info("1️⃣ 샘플 데이터 생성")
-            json_data = extract_pdf_to_json(None, str(self.output_dir))
-            
-            # JSON 저장
-            json_file = self.output_dir / "sample_data.json"
-            with open(json_file, 'w', encoding='utf-8') as f:
-                json.dump(json_data, f, ensure_ascii=False, indent=2)
-            
-            # 2. 정규화
-            logger.info("2️⃣ 데이터 정규화")
-            normalizer = GovernmentStandardNormalizer(str(json_file), str(self.normalized_dir))
-            normalizer.normalize(json_data)
-            normalizer.save_to_csv()
-            normalizer.print_statistics()
-            
-            # 통계
-            for table_name, records in normalizer.data.items():
-                if isinstance(records, list):
-                    self.stats['total_records'] += len(records)
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"샘플 처리 실패: {e}")
-            return False
-    
     def process_batch_mode(self, pdf_files: List[str] = None) -> bool:
         """대량 배치 처리 모드"""
         if not BATCH_AVAILABLE:
@@ -220,7 +186,7 @@ class PDFtoDBPipeline:
                 output_dir=str(self.output_dir),
                 batch_size=self.batch_size,
                 max_workers=self.max_workers,
-                use_multiprocessing=False  # 멀티스레딩 사용 (안정성)
+                use_multiprocessing=False  # 멀티스레딩 사용
             )
             
             pdf_processor_func = create_pdf_processor_func(str(self.output_dir))
@@ -324,7 +290,7 @@ class PDFtoDBPipeline:
             logger.info("="*60)
 
             # Oracle 적재
-            oracle_loader = OracleDBLoader(ORACLE_CONFIG, str(self.normalized_dir))
+            oracle_loader = OracleDirectLoader(ORACLE_CONFIG, str(self.normalized_dir))
             oracle_loader.connect()
 
             # 테이블 생성 (존재하지 않을 경우)
@@ -333,7 +299,7 @@ class PDFtoDBPipeline:
             # 데이터 적재
             oracle_loader.load_all_tables()
 
-            oracle_loader.close()
+            oracle_loader.db_manager.close()
 
             self.stats['db_loaded'] = True
             logger.info(f"   ✅ Oracle DB 적재 완료: {oracle_loader.load_stats['total_records']:,}건")
@@ -345,51 +311,6 @@ class PDFtoDBPipeline:
             logger.warning("⚠️ Oracle 적재 실패했지만 계속 진행합니다.")
             return False
 
-    def generate_report(self):
-        """최종 보고서 생성"""
-        report = []
-        report.append("="*80)
-        report.append("📊 PDF to Database 처리 보고서")
-        report.append("="*80)
-        report.append(f"실행 시간: {self.stats['start_time'].strftime('%Y-%m-%d %H:%M:%S')}")
-        report.append(f"소요 시간: {(datetime.now() - self.stats['start_time']).total_seconds():.1f}초")
-        report.append("")
-        
-        if self.stats['pdf_files']:
-            report.append("📄 처리된 파일:")
-            for pdf in self.stats['pdf_files']:
-                report.append(f"  - {pdf}")
-        
-        report.append("")
-        report.append("📊 처리 결과:")
-        report.append(f"  • 성공: {self.stats['processed']}개")
-        report.append(f"  • 실패: {self.stats['failed']}개")
-        report.append(f"  • 총 레코드: {self.stats['total_records']:,}건")
-        report.append(f"  • DB 적재: {'✅' if self.stats['db_loaded'] else '⏭️ 건너뜀'}")
-        report.append("")
-        
-        # 생성된 파일
-        report.append("📁 생성된 파일:")
-        report.append(f"  • JSON: {self.output_dir}/*.json")
-        report.append(f"  • CSV: {self.normalized_dir}/*.csv")
-        if self.stats['db_loaded']:
-            report.append(f"  • DB: government_standard database")
-        
-        report.append("")
-        report.append("="*80)
-        
-        # 보고서 저장
-        report_text = "\n".join(report)
-        report_file = self.report_dir / f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        
-        with open(report_file, 'w', encoding='utf-8') as f:
-            f.write(report_text)
-        
-        # 콘솔 출력
-        print("\n" + report_text)
-        
-        return report_file
-    
     def run(self, pdf_files: List[str] = None):
         """파이프라인 실행"""
         logger.info("\n" + "="*80)
@@ -416,29 +337,34 @@ class PDFtoDBPipeline:
                     pdf_list = list(self.input_dir.glob("*.pdf"))
                 
                 if not pdf_list:
-                    logger.warning("PDF 파일이 없습니다. 샘플 데이터 모드로 전환...")
-                    success = self.process_sample()
-                    self.stats['processed'] = 1 if success else 0
-                else:
-                    # 각 PDF 처리
-                    for pdf_path in pdf_list:
-                        self.stats['pdf_files'].append(pdf_path.name)
-                        
-                        if self.process_pdf(pdf_path):
-                            self.stats['processed'] += 1
-                        else:
-                            self.stats['failed'] += 1
-                    
-                    success = self.stats['processed'] > 0
-            
+                    logger.error("❌ 처리할 PDF 파일이 없습니다!")
+                    logger.error(f"   '{self.input_dir}' 폴더에 PDF 파일을 넣어주세요.")
+                    return False
+
+                # 각 PDF 처리
+                for pdf_path in pdf_list:
+                    self.stats['pdf_files'].append(pdf_path.name)
+
+                    if self.process_pdf(pdf_path):
+                        self.stats['processed'] += 1
+                    else:
+                        self.stats['failed'] += 1
+
+                success = self.stats['processed'] > 0
+
             # DB 적재
             if success and not self.skip_db:
                 self.load_to_database()
 
-            # 보고서 생성
-            report_file = self.generate_report()
-            logger.info(f"\n📄 보고서 생성: {report_file}")
-            
+            # 최종 통계 출력
+            logger.info("\n" + "="*80)
+            logger.info("📊 처리 결과")
+            logger.info("="*80)
+            logger.info(f"성공: {self.stats['processed']}개")
+            logger.info(f"실패: {self.stats['failed']}개")
+            logger.info(f"총 레코드: {self.stats['total_records']:,}건")
+            logger.info(f"DB 적재: {'✅' if self.stats['db_loaded'] else '⏭️ 건너뜀'}")
+
         except Exception as e:
             logger.error(f"파이프라인 오류: {e}")
             success = False
@@ -459,11 +385,11 @@ class PDFtoDBPipeline:
 def main():
     """메인 함수"""
     parser = argparse.ArgumentParser(
-        description='생명공학육성시행계획 PDF 처리 시스템',
+        description='PDF 처리 시스템',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 예제:
-  python main.py --batch            # 전체 파이프라인 실행 (권장)
+  python main.py --batch            # 전체 파이프라인 실행
   python main.py doc1.pdf           # 특정 PDF 파일 처리
   python main.py --skip-db          # DB 적재 건너뛰기
   python main.py --workers 8        # 병렬 처리 워커 수 지정

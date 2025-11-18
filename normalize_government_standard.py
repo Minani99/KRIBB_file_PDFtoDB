@@ -6,9 +6,8 @@ import json
 import csv
 import re
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any
 from datetime import datetime
-from decimal import Decimal
 import logging
 
 # 로깅 설정
@@ -38,35 +37,37 @@ class GovernmentStandardNormalizer:
 
         logger.info(f"📅 문서 연도 추출: {filename} -> {document_year}년")
 
-        # ID 카운터
+        # ID 카운터 (Oracle DB 형식: 년도 + 일련번호)
         self.id_counters = {
             'sub_project': 1,
             'raw_data': 1,
-            'schedule': 1,
-            'performance': 1,
-            'budget': 1,
-            'overview': 1,
-            'achievement': 1,
-            'plan_detail': 1
         }
 
-        # 데이터 저장소
+        # sub_project_id → PLAN_ID 매핑 (Oracle DB용)
+        self.plan_id_mapping = {}  # {sub_project_id: PLAN_ID}
+
+        # 데이터 저장소 (Oracle DB 스키마와 동일한 구조)
         self.data = {
-            # 마스터
-            'sub_projects': [],
+            # 마스터 테이블 (TB_PLAN_MASTER용)
+            'master': [],
 
-            # 원본 데이터 (감사용)
+            # 상세 정보 (TB_PLAN_DETAIL용)
+            'details': [],
+
+            # 예산 정보 (TB_PLAN_BUDGET용)
+            'budgets': [],
+
+            # 일정 정보 (TB_PLAN_SCHEDULE용)
+            'schedules': [],
+
+            # 성과 정보 (TB_PLAN_PERFORMANCE용)
+            'performances': [],
+
+            # 비중 정보 (TB_PLAN_WEIGHT용)
+            'weights': [],
+
+            # 원본 데이터 (감사용, DB 적재 안함)
             'raw_data': [],
-
-            # 정규화 데이터 (분석용)
-            'normalized_schedules': [],
-            'normalized_performances': [],
-            'normalized_budgets': [],
-            'normalized_overviews': [],
-
-            # 텍스트 데이터
-            'key_achievements': [],  # 대표성과
-            'plan_details': [],  # 주요 추진계획 내용
         }
 
         # 컨텍스트
@@ -94,12 +95,11 @@ class GovernmentStandardNormalizer:
 
     def _save_raw_data(self, data_type: str, content: Any,
                       page_number: int, table_index: int) -> int:
-        """원본 데이터 저장"""
+        """원본 데이터 저장 (감사용, DB에 적재하지 않음)"""
         raw_id = self._get_next_id('raw_data')
 
         self.data['raw_data'].append({
             'id': raw_id,
-            'sub_project_id': self.current_context['sub_project_id'],
             'data_type': data_type,
             'data_year': self.current_context.get(f'{data_type}_year',
                                                  self.current_context['document_year']),
@@ -129,7 +129,6 @@ class GovernmentStandardNormalizer:
             achievement = achievement.strip()
             if achievement and len(achievement) > 10:  # 최소 길이 체크
                 achievements.append({
-                    'id': self._get_next_id('achievement'),
                     'sub_project_id': self.current_context['sub_project_id'],
                     'achievement_year': self.current_context['performance_year'],
                     'achievement_order': idx + 1,
@@ -162,7 +161,6 @@ class GovernmentStandardNormalizer:
             plan = plan.strip()
             if plan and len(plan) > 5:
                 plans.append({
-                    'id': self._get_next_id('plan_detail'),
                     'sub_project_id': self.current_context['sub_project_id'],
                     'plan_year': self.current_context['plan_year'],
                     'plan_order': idx + 1,
@@ -172,112 +170,191 @@ class GovernmentStandardNormalizer:
 
         return plans
 
+    def _extract_qualitative_achievements(self, full_text: str, page_num: int) -> List[Dict]:
+        """정성적 성과 추출 (텍스트 기반)"""
+        normalized = []
+
+        if not self.current_context.get('sub_project_id'):
+            return []
+
+        plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
+        year = self.current_context.get('plan_year', self.current_context.get('document_year'))
+
+        # "추진실적", "주요성과" 섹션 찾기
+        patterns = [
+            r'(?:추진실적|주요성과)\s*[:\n]?\s*(.*?)(?=\n\n|$|\(2\)|②)',
+            r'○\s*(?:추진실적|주요성과)\s*(.*?)(?=○|$)',
+        ]
+
+        for pattern in patterns:
+            matches = re.findall(pattern, full_text, re.DOTALL)
+            for match in matches:
+                content = match.strip()
+                if len(content) > 10:  # 최소 길이 체크
+                    # 줄바꿈으로 분리하여 여러 항목 추출
+                    items = [item.strip() for item in content.split('\n') if item.strip()]
+
+                    for item in items:
+                        # 불릿 포인트나 숫자로 시작하는 항목
+                        if re.match(r'^[•\-\d).]\s*', item):
+                            normalized.append({
+                                'PLAN_ID': plan_id,
+                                'PERFORMANCE_YEAR': year,
+                                'PERFORMANCE_TYPE': '정성적실적',
+                                'CATEGORY': '추진실적',
+                                'VALUE': None,
+                                'UNIT': None,
+                                'ORIGINAL_TEXT': item[:4000]
+                            })
+
+        return normalized
+
     def _normalize_schedule_data(self, period: str, task: str, detail: str,
                                 raw_data_id: int) -> List[Dict]:
-        """일정 데이터 정규화 - 분기별로 철저히 분리"""
+        """일정 데이터 정규화 - 세부일정(task/detail)에서 실제 날짜 추출"""
         normalized = []
         year = self.current_context['plan_year']
 
-        # 헤더나 빈 행 필터링
+        if not self.current_context.get('sub_project_id'):
+            return []
+
         if not period or not task or period in ['구분', '추진일정', '추진사항', '항목', '주요내용']:
             return []
 
-        # task를 개별 항목으로 분리 (• 기준)
+        # ✅ task와 detail을 합쳐서 전체 텍스트로 처리
+        full_task_text = f"{task}\n{detail}" if detail else task
+
+        # task를 개별 항목으로 분리
         task_items = []
-        if '•' in task:
-            # "• 리더연구\n- 내용\n• 중견연구\n- 내용" 형태를 분리
-            parts = task.split('•')
+        if '•' in full_task_text:
+            parts = full_task_text.split('•')
             for part in parts:
                 part = part.strip()
                 if part:
                     task_items.append('• ' + part)
         else:
-            task_items = [task]
+            task_items = [full_task_text]
 
-        # 분기별 종료일 계산
         def get_quarter_end_date(year: int, quarter: int) -> str:
             month_end = quarter * 3
-            if month_end == 3:
-                return f"{year}-03-31"
-            elif month_end == 6:
-                return f"{year}-06-30"
-            elif month_end == 9:
-                return f"{year}-09-30"
-            else:  # 12월
-                return f"{year}-12-31"
+            return f"{year}-{month_end:02d}-{[31,30,30,31][quarter-1]:02d}"
 
-        # 분기 추출 함수
+        # ✅ 세부일정 텍스트에서 실제 날짜 추출
+        def extract_month_range_from_detail(text):
+            """
+            세부일정에서 실제 날짜 추출:
+            - '20.1월~12월
+            - 1월~3월
+            - 21년 1월
+            """
+            # 패턴 1: "'20.1월~12월", "'21.1월~3월"
+            match1 = re.search(r"'(\d{2})\.(\d+)월\s*[~\-]\s*(\d+)월", text)
+            if match1:
+                year_short = int(match1.group(1))
+                start_month = int(match1.group(2))
+                end_month = int(match1.group(3))
+                full_year = 2000 + year_short
+                return (full_year, start_month, end_month)
+
+            # 패턴 2: "1월~12월", "1월 ~ 3월"
+            match2 = re.search(r'(\d+)월\s*[~\-]\s*(\d+)월', text)
+            if match2:
+                start_month = int(match2.group(1))
+                end_month = int(match2.group(2))
+                return (year, start_month, end_month)
+
+            # 패턴 3: "'20.1~12", "2020.1~12"
+            match3 = re.search(r"'?(\d{2,4})\.(\d+)\s*[~\-]\s*(\d+)", text)
+            if match3:
+                year_str = match3.group(1)
+                full_year = 2000 + int(year_str) if len(year_str) == 2 else int(year_str)
+                start_month = int(match3.group(2))
+                end_month = int(match3.group(3))
+                return (full_year, start_month, end_month)
+
+            # 패턴 4: "21년 1월" (단일 월)
+            match4 = re.search(r'(\d{2})년\s*(\d+)월', text)
+            if match4:
+                year_short = int(match4.group(1))
+                month = int(match4.group(2))
+                full_year = 2000 + year_short
+                return (full_year, month, month)
+
+            return None
+
         def extract_quarters(period_text):
             quarters = []
-            # Case 1: 병합된 분기 (1/4분기 ~ 2/4분기)
             if '~' in period_text and '분기' in period_text:
                 quarter_match = re.search(r'(\d)/4\s*분기\s*~\s*(\d)/4\s*분기', period_text)
                 if quarter_match:
                     start_q = int(quarter_match.group(1))
                     end_q = int(quarter_match.group(2))
                     quarters = list(range(start_q, end_q + 1))
-            # Case 2: 연중
             elif '연중' in period_text:
                 quarters = [1, 2, 3, 4]
-            # Case 3: 단일 분기
             elif '분기' in period_text:
                 quarter_match = re.search(r'(\d)/4\s*분기', period_text)
                 if quarter_match:
                     quarters = [int(quarter_match.group(1))]
             return quarters
 
-        quarters = extract_quarters(period)
+        plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
 
-        # 각 항목별로 레코드 생성
         for task_item in task_items:
             task_item = task_item.strip()
             if not task_item:
                 continue
 
-            # 작업 카테고리 추출 (• 리더연구 등)
             task_category = ""
             if '•' in task_item:
-                # "• 리더연구" 부분 추출
                 first_line = task_item.split('\n')[0].replace('•', '').strip()
                 task_category = first_line
 
-            # 각 분기별로 레코드 생성
-            if quarters:
-                for quarter in quarters:
-                    record = {
-                        'id': self._get_next_id('schedule'),
-                        'sub_project_id': self.current_context['sub_project_id'],
-                        'raw_data_id': raw_data_id,
-                        'document_year': self.current_context['document_year'],
-                        'year': year,
-                        'quarter': quarter,
-                        'month_start': (quarter - 1) * 3 + 1,
-                        'month_end': quarter * 3,
-                        'start_date': f"{year}-{(quarter-1)*3+1:02d}-01",
-                        'end_date': get_quarter_end_date(year, quarter),
-                        'task_category': task_category,
-                        'task_description': task_item,
-                        'original_period': period
-                    }
-                    normalized.append(record)
-            else:
-                # 분기 정보가 없으면 기본값
+            # ✅ 1순위: 세부일정에서 실제 날짜 추출
+            month_info = extract_month_range_from_detail(task_item)
+
+            if month_info:
+                parsed_year, start_month, end_month = month_info
+                import calendar
+                last_day = calendar.monthrange(parsed_year, end_month)[1]
+
                 record = {
-                    'id': self._get_next_id('schedule'),
-                    'sub_project_id': self.current_context['sub_project_id'],
-                    'raw_data_id': raw_data_id,
-                    'document_year': self.current_context['document_year'],
-                    'year': year,
-                    'quarter': 0,
-                    'month_start': 1,
-                    'month_end': 12,
-                    'start_date': f"{year}-01-01",
-                    'end_date': f"{year}-12-31",
-                    'task_category': task_category,
-                    'task_description': task_item,
-                    'original_period': period
+                    'PLAN_ID': plan_id,
+                    'SCHEDULE_YEAR': parsed_year,
+                    'QUARTER': f"{start_month}월~{end_month}월",
+                    'TASK_NAME': task_category[:768] if task_category else None,
+                    'TASK_CONTENT': task_item[:4000] if task_item else None,
+                    'START_DATE': f"{parsed_year}-{start_month:02d}-01",
+                    'END_DATE': f"{parsed_year}-{end_month:02d}-{last_day:02d}"
                 }
                 normalized.append(record)
+            else:
+                # ✅ 2순위: period의 분기로 대체
+                quarters = extract_quarters(period)
+
+                if quarters:
+                    for quarter in quarters:
+                        record = {
+                            'PLAN_ID': plan_id,
+                            'SCHEDULE_YEAR': year,
+                            'QUARTER': f"{quarter}/4분기",
+                            'TASK_NAME': task_category[:768] if task_category else None,
+                            'TASK_CONTENT': task_item[:4000] if task_item else None,
+                            'START_DATE': f"{year}-{(quarter-1)*3+1:02d}-01",
+                            'END_DATE': get_quarter_end_date(year, quarter)
+                        }
+                        normalized.append(record)
+                else:
+                    record = {
+                        'PLAN_ID': plan_id,
+                        'SCHEDULE_YEAR': year,
+                        'QUARTER': '연중',
+                        'TASK_NAME': task_category[:768] if task_category else None,
+                        'TASK_CONTENT': task_item[:4000] if task_item else None,
+                        'START_DATE': f"{year}-01-01",
+                        'END_DATE': f"{year}-12-31"
+                    }
+                    normalized.append(record)
 
         return normalized
 
@@ -309,18 +386,16 @@ class GovernmentStandardNormalizer:
                             val_str = str(data_row[idx]).replace(',', '').strip()
                             if val_str and val_str != '-':
                                 val = float(val_str)
-                                if val > 0:
+                                if val > 0 and self.current_context.get('sub_project_id'):
+                                    plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
                                     normalized.append({
-                                        'id': self._get_next_id('performance'),
-                                        'sub_project_id': self.current_context['sub_project_id'],
-                                        'raw_data_id': raw_data_id,
-                                        'document_year': self.current_context['document_year'],
-                                        'performance_year': year,
-                                        'indicator_category': '특허',
-                                        'indicator_type': indicator_type,
-                                        'value': val,
-                                        'unit': '건',
-                                        'original_text': str(rows)
+                                        'PLAN_ID': plan_id,
+                                        'PERFORMANCE_YEAR': year,
+                                        'PERFORMANCE_TYPE': '특허',
+                                        'CATEGORY': indicator_type,
+                                        'VALUE': val,
+                                        'UNIT': '건',
+                                        'ORIGINAL_TEXT': str(rows)[:4000]
                                     })
                         except: pass
 
@@ -336,18 +411,16 @@ class GovernmentStandardNormalizer:
                             val_str = str(data_row[idx]).replace(',', '').strip()
                             if val_str and val_str != '-':
                                 val = float(val_str)
-                                if val > 0:
+                                if val > 0 and self.current_context.get('sub_project_id'):
+                                    plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
                                     normalized.append({
-                                        'id': self._get_next_id('performance'),
-                                        'sub_project_id': self.current_context['sub_project_id'],
-                                        'raw_data_id': raw_data_id,
-                                        'document_year': self.current_context['document_year'],
-                                        'performance_year': year,
-                                        'indicator_category': '논문',
-                                        'indicator_type': indicator_type,
-                                        'value': val,
-                                        'unit': '편',
-                                        'original_text': str(rows)
+                                        'PLAN_ID': plan_id,
+                                        'PERFORMANCE_YEAR': year,
+                                        'PERFORMANCE_TYPE': '논문',
+                                        'CATEGORY': indicator_type,
+                                        'VALUE': val,
+                                        'UNIT': '편',
+                                        'ORIGINAL_TEXT': str(rows)[:4000]
                                     })
                         except: pass
 
@@ -558,33 +631,34 @@ class GovernmentStandardNormalizer:
         return normalized
 
     def _normalize_budget_data(self, rows: List[List], raw_data_id: int) -> List[Dict]:
-        """예산 데이터 정규화 - 셀 내부 줄바꿈 처리 (완전 개선 버전)"""
+        """예산 데이터 정규화 - Oracle TB_PLAN_BUDGET 스키마에 맞춤"""
         normalized = []
 
         if not rows or len(rows) < 2:
             return []
 
-        # 1단계: 첫 행에서 연도 정보 추출 (셀 내부 줄바꿈 고려)
-        year_columns = {}  # {컬럼 인덱스: (연도, 실적/계획)}
+        if not self.current_context.get('sub_project_id'):
+            return []
 
+        plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
+        if not plan_id:
+            return []
+
+        # 1단계: 연도 컬럼 파싱
+        year_columns = {}  # {컬럼 인덱스: (연도, 실적/계획)}
         first_row = rows[0]
+
         for col_idx, cell in enumerate(first_row):
             cell_str = str(cell).strip()
-
-            # 셀 내부에 줄바꿈이 있는 경우: "2020년\n실적" 형태
             lines = cell_str.split('\n')
-
             year = None
-            category = '계획'  # 기본값
+            category = '계획'
 
             for line in lines:
                 line = line.strip()
-                # 연도 찾기
                 year_match = re.search(r'(20\d{2})', line)
                 if year_match:
                     year = int(year_match.group(1))
-
-                # 실적/계획 판단
                 if '실적' in line:
                     category = '실적'
                 elif '계획' in line:
@@ -596,107 +670,91 @@ class GovernmentStandardNormalizer:
         if not year_columns:
             return []
 
-        # 2단계: 데이터 행 처리 (첫 행 이후)
+        # 2단계: 예산 타입별로 금액 집계 (연도별로 그룹화)
+        budget_by_year = {}  # {(year, category): {gov: amount, private: amount, ...}}
+
         for row_idx, row in enumerate(rows[1:], 1):
-            # 빈 행 건너뛰기
             if not any(cell for cell in row if cell and str(cell).strip()):
                 continue
 
-            # "사업비\n구 분" 컬럼(보통 3번째 컬럼)에서 예산 타입 추출
-            # 테이블 구조: [사업명, 사업기간, 구분, 2020년, 2021년, ...]
-            budget_type_col_idx = -1
-
-            # "구분" 또는 "사업비" 컬럼 찾기
+            # 예산 타입 추출 (보통 3번째 컬럼)
+            budget_type_col_idx = 2
             for idx, cell in enumerate(first_row):
-                cell_lower = str(cell).lower()
-                if '구 분' in cell_lower or '구분' in cell_lower or '사업비' in cell_lower:
+                if '구 분' in str(cell) or '구분' in str(cell):
                     budget_type_col_idx = idx
                     break
 
-            # 기본값: 3번째 컬럼 (인덱스 2)
-            if budget_type_col_idx == -1:
-                budget_type_col_idx = 2
-
-            # 예산 타입 추출
             if budget_type_col_idx >= len(row):
                 continue
 
-            budget_type_text = str(row[budget_type_col_idx]).strip().lower()
+            budget_type_text = str(row[budget_type_col_idx]).strip()
 
-            # 스킵 키워드 체크
-            skip_keywords = ['소계', '합계', '총계', '사업명', '사업기간', '구분', '사업비']
-            if any(skip in budget_type_text for skip in skip_keywords):
+            # 스킵 키워드
+            if any(kw in budget_type_text for kw in ['소계', '합계', '총계', '사업명', '구분']):
                 continue
 
-            # 빈 셀 건너뛰기
-            if not budget_type_text or budget_type_text in ['-', '']:
-                continue
-
-            # 예산 타입 결정
-            budget_type = None
+            # 예산 타입 매핑
+            budget_type_key = None
             if '정부' in budget_type_text or '국비' in budget_type_text:
-                budget_type = '정부'
+                budget_type_key = 'gov'
             elif '민간' in budget_type_text:
-                budget_type = '민간'
-            elif '지방' in budget_type_text or '지자체' in budget_type_text:
-                budget_type = '지방비'
+                budget_type_key = 'private'
+            elif '지방' in budget_type_text:
+                budget_type_key = 'local'
             else:
-                # 알 수 없는 타입은 건너뛰기
-                continue
+                budget_type_key = 'etc'
 
-            # 3단계: 각 연도 컬럼의 금액 추출
+            # 각 연도 컬럼의 금액 추출
             for col_idx, (year, category) in year_columns.items():
                 if col_idx >= len(row):
                     continue
 
                 cell_str = str(row[col_idx]).strip()
-
-                # 빈 값이나 "-" 제외
                 if not cell_str or cell_str in ['-', '', 'nan']:
                     continue
 
                 try:
-                    # 숫자 추출 (쉼표, 단위 제거)
-                    amount_str = cell_str.replace(',', '').replace('백만원', '').replace('억원', '').strip()
-
-                    # 줄바꿈이 있을 수 있으니 첫 번째 라인만
-                    amount_str = amount_str.split('\n')[0].strip()
-
-                    if not amount_str or amount_str == '0':
-                        continue
-
-                    amount = float(amount_str)
-
+                    amount = float(cell_str.replace(',', '').replace('백만원', '').strip().split('\n')[0])
                     if amount <= 0:
                         continue
 
-                    # 실적/계획 구분
-                    current_year = self.current_context.get('plan_year', self.current_context.get('document_year', datetime.now().year))
-                    is_actual = year < current_year or category == '실적'
+                    key = (year, category)
+                    if key not in budget_by_year:
+                        budget_by_year[key] = {'gov': 0, 'private': 0, 'local': 0, 'etc': 0}
+                    budget_by_year[key][budget_type_key] += amount
 
-                    record = {
-                        'id': self._get_next_id('budget'),
-                        'sub_project_id': self.current_context['sub_project_id'],
-                        'raw_data_id': raw_data_id,
-                        'document_year': self.current_context['document_year'],
-                        'budget_year': year,
-                        'budget_category': category,
-                        'budget_type': budget_type,
-                        'amount': amount,
-                        'currency': 'KRW',
-                        'is_actual': is_actual,
-                        'original_text': f"{budget_type}: {cell_str}"
-                    }
-                    normalized.append(record)
-
-                except (ValueError, TypeError) as e:
-                    # 파싱 실패는 무시
+                except (ValueError, TypeError):
                     continue
+
+        # 3단계: Oracle 스키마에 맞게 레코드 생성
+        for (year, category), amounts in budget_by_year.items():
+            total = amounts['gov'] + amounts['private'] + amounts['local'] + amounts['etc']
+
+            record = {
+                'PLAN_ID': plan_id,
+                'BUDGET_YEAR': year,
+                'CATEGORY': category,
+                'TOTAL_AMOUNT': total if total > 0 else None,
+                'GOV_AMOUNT': amounts['gov'] if amounts['gov'] > 0 else None,
+                'PRIVATE_AMOUNT': amounts['private'] if amounts['private'] > 0 else None,
+                'LOCAL_AMOUNT': amounts['local'] if amounts['local'] > 0 else None,
+                'ETC_AMOUNT': amounts['etc'] if amounts['etc'] > 0 else None,
+                'PERFORM_PRC': total if category == '실적' else None,
+                'PLAN_PRC': total if category == '계획' else None
+            }
+            normalized.append(record)
 
         return normalized
 
     def _process_overview(self, full_text: str, tables: List[Dict], page_number: int, raw_data_id: int):
-        """사업개요 처리 - 전체 텍스트와 테이블 모두 사용"""
+        """사업개요 처리 - TB_PLAN_DETAIL 업데이트"""
+
+        if not self.current_context.get('sub_project_id'):
+            return
+
+        plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'])
+        if not plan_id:
+            return
 
         # 테이블에서 기본 정보 추출
         overview_data = {}
@@ -713,32 +771,24 @@ class GovernmentStandardNormalizer:
         objective = ""
         content = ""
 
-        # 사업목표 추출
         obj_match = re.search(r'○\s*사업목표\s*(.*?)(?:○\s*사업내용|$)', full_text, re.DOTALL)
         if obj_match:
             objective = obj_match.group(1).strip()
 
-        # 사업내용 추출
         content_match = re.search(r'○\s*사업내용\s*(.*?)(?:\(2\)|②|$)', full_text, re.DOTALL)
         if content_match:
             content = content_match.group(1).strip()
 
-        # DB 스키마에 맞게 데이터 저장
-        self.data['normalized_overviews'].append({
-            'id': self._get_next_id('overview'),
-            'sub_project_id': self.current_context['sub_project_id'],
-            'raw_data_id': raw_data_id,
-            'overview_type': '사업개요',
-            'document_year': self.current_context['document_year'],
-            'main_project': overview_data.get('세부사업명', ''),
-            'sub_project': overview_data.get('내역사업명', ''),
-            'field': overview_data.get('대표분야', ''),
-            'project_type': overview_data.get('사업성격', ''),
-            'objective': objective,
-            'content': content,
-            'managing_dept': overview_data.get('주관기관', ''),
-            'managing_org': overview_data.get('관리기관', '')
-        })
+        # TB_PLAN_DETAIL 레코드 찾아서 업데이트
+        for detail in self.data['details']:
+            if detail['PLAN_ID'] == plan_id:
+                detail['BIZ_TYPE'] = overview_data.get('사업성격', '')[:768] if overview_data.get('사업성격') else None
+                detail['REP_FLD'] = overview_data.get('대표분야', '')[:768] if overview_data.get('대표분야') else None
+                detail['LEAD_ORGAN_NM'] = overview_data.get('주관기관', '')[:768] if overview_data.get('주관기관') else None
+                detail['MNG_ORGAN_NM'] = overview_data.get('관리기관', '')[:768] if overview_data.get('관리기관') else None
+                detail['LAST_GOAL'] = objective[:4000] if objective else None
+                detail['BIZ_CONTENTS'] = content[:4000] if content else None
+                break
 
     def _process_sub_project(self, text: str, tables: List[Dict]) -> bool:
         """내역사업 처리"""
@@ -775,28 +825,55 @@ class GovernmentStandardNormalizer:
             return False
 
         # 이미 등록된 내역사업인지 체크
-        for proj in self.data['sub_projects']:
-            if proj['sub_project_name'] == sub_project_name:
-                self.current_context['sub_project_id'] = proj['id']
-                logger.info(f"📌 기존 내역사업 재사용: {sub_project_name} (ID: {proj['id']})")
+        for master in self.data['master']:
+            if master['DETAIL_BIZ_NM'] == sub_project_name:
+                self.current_context['sub_project_id'] = master['_internal_id']
+                logger.info(f"📌 기존 내역사업 재사용: {sub_project_name} (PLAN_ID: {master['PLAN_ID']})")
                 return True
 
         # 새로운 내역사업 생성
         sub_id = self._get_next_id('sub_project')
-        project = {
-            'id': sub_id,
-            'project_code': f"GOV-{self.current_context['document_year']}-{sub_id:03d}",
-            'department_name': '과학기술정보통신부',
-            'main_project_name': main_project_name or '바이오·의료기술개발',
-            'sub_project_name': sub_project_name,
-            'document_year': self.current_context['document_year']
+
+        # Oracle DB PLAN_ID 형식: 년도 + 3자리 일련번호 (예: 2024001)
+        plan_id = f"{self.current_context['document_year']}{str(sub_id).zfill(3)}"
+
+        # TB_PLAN_MASTER 레코드 생성
+        master_record = {
+            '_internal_id': sub_id,  # 내부 매핑용 (CSV 저장 안함)
+            'PLAN_ID': plan_id,
+            'YEAR': self.current_context['document_year'],
+            'NUM': sub_id,
+            'NATION_ORGAN_NM': '과학기술정보통신부',
+            'BIZ_NM': main_project_name or '바이오·의료기술개발사업',
+            'DETAIL_BIZ_NM': sub_project_name
         }
 
-        self.data['sub_projects'].append(project)
-        self.current_context['sub_project_id'] = sub_id
+        # TB_PLAN_DETAIL 레코드 생성 (초기값, 나중에 overview에서 업데이트)
+        detail_record = {
+            'DETAIL_ID': f"{plan_id}D01",
+            'PLAN_ID': plan_id,
+            'BIZ_TYPE': None,
+            'REP_FLD': None,
+            'AREA': None,
+            'LEAD_ORGAN_NM': None,
+            'MNG_ORGAN_NM': None,
+            'BIZ_SDT': None,
+            'BIZ_EDT': None,
+            'RESPERIOD': None,
+            'CUR_RESPERIOD': None,
+            'LAST_GOAL': None,
+            'BIZ_CONTENTS': None,
+            'BIZ_CONTENTS_KEYWORD': None
+        }
 
-        logger.info(f"✅ 내역사업 등록: {sub_project_name} (ID: {sub_id})")
+        self.data['master'].append(master_record)
+        self.data['details'].append(detail_record)
+        self.current_context['sub_project_id'] = sub_id
+        self.plan_id_mapping[sub_id] = plan_id  # 매핑 저장
+
+        logger.info(f"✅ 내역사업 등록: {sub_project_name} (ID: {sub_id}, PLAN_ID: {plan_id})")
         return True
+
 
     def normalize(self, json_data: Dict) -> bool:
         """JSON 데이터 정규화 (전체 처리)"""
@@ -826,26 +903,27 @@ class GovernmentStandardNormalizer:
                 if page_sub_project:
                     # 이미 등록된 내역사업인지 체크
                     existing_project = None
-                    for proj in self.data['sub_projects']:
-                        if proj['sub_project_name'] == page_sub_project:
-                            existing_project = proj
+                    for master in self.data['master']:
+                        if master['DETAIL_BIZ_NM'] == page_sub_project:
+                            existing_project = master
                             break
 
                     if existing_project:
                         # 기존 프로젝트로 전환
-                        if self.current_context.get('sub_project_id') != existing_project['id']:
-                            self.current_context['sub_project_id'] = existing_project['id']
-                            logger.info(f"📌 내역사업 전환: {page_sub_project} (ID: {existing_project['id']})")
+                        if self.current_context.get('sub_project_id') != existing_project['_internal_id']:
+                            self.current_context['sub_project_id'] = existing_project['_internal_id']
+                            logger.info(f"📌 내역사업 전환: {page_sub_project} (PLAN_ID: {existing_project['PLAN_ID']})")
                     else:
                         # 새로운 내역사업 처리
                         self._process_sub_project(page_full_text, page_tables)
-                else:
-                    # 페이지에 sub_project 정보가 없으면 텍스트/테이블에서 찾기
-                    if '내역사업명' in page_full_text:
-                        self._process_sub_project(page_full_text, page_tables)
+                elif '내역사업명' in page_full_text or '세부사업명' in page_full_text:
+                    # 페이지에 sub_project 정보가 없지만 텍스트에 있으면 찾기
+                    self._process_sub_project(page_full_text, page_tables)
+                # else: 내역사업 정보가 없으면 이전 페이지의 sub_project_id를 유지
 
-                # sub_project_id가 없으면 건너뛰기
+                # sub_project_id가 여전히 없으면 경고 후 건너뛰기
                 if not self.current_context.get('sub_project_id'):
+                    logger.debug(f"⚠️ 페이지 {page_num}: sub_project_id 없음, 건너뜀")
                     continue
 
                 # 원본 데이터 저장
@@ -877,6 +955,12 @@ class GovernmentStandardNormalizer:
 
                 elif page_category == 'performance':
 
+                    # 페이지 텍스트에서 정성적 성과 추출
+                    qualitative = self._extract_qualitative_achievements(page_full_text, page_num)
+                    if qualitative:
+                        self.data['performances'].extend(qualitative)
+                        self.validation_stats['normalized_records'] += len(qualitative)
+
                     # 테이블 처리 (성과 또는 예산)
                     for idx, table in enumerate(page_tables):
                         rows = table.get('data', [])
@@ -891,13 +975,13 @@ class GovernmentStandardNormalizer:
                             # 예산 테이블
                             table_raw_id = self._save_raw_data('plan', table, page_num, idx)
                             normalized = self._normalize_budget_data(rows, table_raw_id)
-                            self.data['normalized_budgets'].extend(normalized)
+                            self.data['budgets'].extend(normalized)
                             self.validation_stats['normalized_records'] += len(normalized)
                         else:
                             # 성과 테이블
                             table_raw_id = self._save_raw_data('performance', table, page_num, idx)
                             normalized = self._normalize_performance_table(rows, table_raw_id)
-                            self.data['normalized_performances'].extend(normalized)
+                            self.data['performances'].extend(normalized)
                             self.validation_stats['normalized_records'] += len(normalized)
 
                         self.validation_stats['processed_tables'] += 1
@@ -927,18 +1011,18 @@ class GovernmentStandardNormalizer:
                                         normalized = self._normalize_schedule_data(
                                             period, task, detail, table_raw_id
                                         )
-                                        self.data['normalized_schedules'].extend(normalized)
+                                        self.data['schedules'].extend(normalized)
                                         self.validation_stats['normalized_records'] += len(normalized)
 
                         elif '예산' in header_text or '사업비' in header_text:
                             # 예산 테이블
                             normalized = self._normalize_budget_data(rows, table_raw_id)
-                            self.data['normalized_budgets'].extend(normalized)
+                            self.data['budgets'].extend(normalized)
                             self.validation_stats['normalized_records'] += len(normalized)
 
                         self.validation_stats['processed_tables'] += 1
 
-            logger.info(f"✅ 정규화 완료: {len(self.data['sub_projects'])}개 내역사업")
+            logger.info(f"✅ 정규화 완료: {len(self.data['master'])}개 내역사업")
             return True
 
         except Exception as e:
@@ -948,58 +1032,125 @@ class GovernmentStandardNormalizer:
             return False
 
     def save_to_csv(self):
-        """CSV 저장"""
-        for table_name, records in self.data.items():
-            if not records or table_name == 'data_statistics':
-                continue
+        """CSV 저장 - Oracle DB 스키마에 맞춤"""
 
-            csv_path = self.output_dir / f"{table_name}.csv"
-
+        # TB_PLAN_MASTER (내부 ID 제외)
+        if self.data['master']:
+            csv_path = self.output_dir / "TB_PLAN_MASTER.csv"
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                if records:
-                    writer = csv.DictWriter(f, fieldnames=records[0].keys())
-                    writer.writeheader()
-                    writer.writerows(records)
+                fieldnames = ['PLAN_ID', 'YEAR', 'NUM', 'NATION_ORGAN_NM', 'BIZ_NM', 'DETAIL_BIZ_NM']
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for record in self.data['master']:
+                    # _internal_id는 저장하지 않음
+                    row = {k: v for k, v in record.items() if k != '_internal_id'}
+                    writer.writerow(row)
+            logger.info(f"✅ TB_PLAN_MASTER.csv 저장 ({len(self.data['master'])}건)")
 
-            logger.info(f"✅ {table_name}.csv 저장 ({len(records)}건)")
+        # TB_PLAN_DETAIL
+        if self.data['details']:
+            csv_path = self.output_dir / "TB_PLAN_DETAIL.csv"
+            with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=self.data['details'][0].keys())
+                writer.writeheader()
+                writer.writerows(self.data['details'])
+            logger.info(f"✅ TB_PLAN_DETAIL.csv 저장 ({len(self.data['details'])}건)")
+
+        # TB_PLAN_BUDGET
+        if self.data['budgets']:
+            csv_path = self.output_dir / "TB_PLAN_BUDGET.csv"
+            with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=self.data['budgets'][0].keys())
+                writer.writeheader()
+                writer.writerows(self.data['budgets'])
+            logger.info(f"✅ TB_PLAN_BUDGET.csv 저장 ({len(self.data['budgets'])}건)")
+
+        # TB_PLAN_SCHEDULE
+        if self.data['schedules']:
+            csv_path = self.output_dir / "TB_PLAN_SCHEDULE.csv"
+            with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=self.data['schedules'][0].keys())
+                writer.writeheader()
+                writer.writerows(self.data['schedules'])
+            logger.info(f"✅ TB_PLAN_SCHEDULE.csv 저장 ({len(self.data['schedules'])}건)")
+
+        # TB_PLAN_PERFORMANCE
+        if self.data['performances']:
+            csv_path = self.output_dir / "TB_PLAN_PERFORMANCE.csv"
+            with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=self.data['performances'][0].keys())
+                writer.writeheader()
+                writer.writerows(self.data['performances'])
+            logger.info(f"✅ TB_PLAN_PERFORMANCE.csv 저장 ({len(self.data['performances'])}건)")
+
+        # TB_PLAN_WEIGHT (현재는 비어있을 수 있음)
+        if self.data['weights']:
+            csv_path = self.output_dir / "TB_PLAN_WEIGHT.csv"
+            with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=self.data['weights'][0].keys())
+                writer.writeheader()
+                writer.writerows(self.data['weights'])
+            logger.info(f"✅ TB_PLAN_WEIGHT.csv 저장 ({len(self.data['weights'])}건)")
+
+        # 원본 데이터 (감사용)
+        if self.data['raw_data']:
+            csv_path = self.output_dir / "raw_data.csv"
+            with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=self.data['raw_data'][0].keys())
+                writer.writeheader()
+                writer.writerows(self.data['raw_data'])
+            logger.info(f"✅ raw_data.csv 저장 ({len(self.data['raw_data'])}건)")
 
     def print_statistics(self):
         """통계 출력"""
         print("\n" + "="*80)
-        print("📊 정부 표준 정규화 완료")
+        print("📊 정부 표준 정규화 완료 (Oracle DB 스키마)")
         print("="*80)
 
-        print(f"\n📁 내역사업: {len(self.data['sub_projects'])}개")
-        for project in self.data['sub_projects']:
-            print(f"  - {project['sub_project_name']} ({project['project_code']})")
+        print(f"\n📁 내역사업 (TB_PLAN_MASTER): {len(self.data['master'])}개")
+        for master in self.data['master'][:10]:  # 처음 10개만 표시
+            print(f"  - {master['DETAIL_BIZ_NM']} (PLAN_ID: {master['PLAN_ID']})")
+        if len(self.data['master']) > 10:
+            print(f"  ... 외 {len(self.data['master']) - 10}개")
 
-        print(f"\n📋 데이터 통계:")
-        print(f"  원본 데이터: {len(self.data['raw_data'])}건")
-        print(f"  정규화 일정: {len(self.data['normalized_schedules'])}건")
-        print(f"  정규화 성과: {len(self.data['normalized_performances'])}건")
-        print(f"  정규화 예산: {len(self.data['normalized_budgets'])}건")
-        print(f"  사업개요: {len(self.data['normalized_overviews'])}건")
-        print(f"  대표성과: {len(self.data['key_achievements'])}건")
-        print(f"  주요계획: {len(self.data['plan_details'])}건")
+        print(f"\n📋 Oracle 테이블별 데이터 통계:")
+        print(f"  TB_PLAN_MASTER:      {len(self.data['master'])}건")
+        print(f"  TB_PLAN_DETAIL:      {len(self.data['details'])}건")
+        print(f"  TB_PLAN_BUDGET:      {len(self.data['budgets'])}건")
+        print(f"  TB_PLAN_SCHEDULE:    {len(self.data['schedules'])}건")
+        print(f"  TB_PLAN_PERFORMANCE: {len(self.data['performances'])}건")
+        print(f"  TB_PLAN_WEIGHT:      {len(self.data['weights'])}건")
+        print(f"  raw_data (감사용):    {len(self.data['raw_data'])}건")
 
         print("="*80 + "\n")
 
 
 if __name__ == "__main__":
-    json_file = "output/2024년도 생명공학육성시행계획(안) 부록_내역사업_테스트.json"
-    output_folder = "normalized_government"
+    import sys
 
-    if Path(json_file).exists():
-        normalizer = GovernmentStandardNormalizer(json_file, output_folder)
+    if len(sys.argv) < 2:
+        print("사용법: python normalize_government_standard.py <JSON파일경로> [출력디렉토리]")
+        print("예제: python normalize_government_standard.py output/2024년도_생명공학육성시행계획.json normalized_output_government")
+        sys.exit(1)
 
-        with open(json_file, 'r', encoding='utf-8') as f:
-            json_data = json.load(f)
+    json_file = sys.argv[1]
+    output_folder = sys.argv[2] if len(sys.argv) > 2 else "normalized_output_government"
 
-        success = normalizer.normalize(json_data)
+    if not Path(json_file).exists():
+        print(f"❌ 파일을 찾을 수 없습니다: {json_file}")
+        sys.exit(1)
 
-        if success:
-            normalizer.save_to_csv()
-            normalizer.print_statistics()
-        else:
-            print("❌ 정규화 실패!")
+    normalizer = GovernmentStandardNormalizer(json_file, output_folder)
 
+    with open(json_file, 'r', encoding='utf-8') as f:
+        json_data = json.load(f)
+
+    success = normalizer.normalize(json_data)
+
+    if success:
+        normalizer.save_to_csv()
+        normalizer.print_statistics()
+        print(f"\n✅ 정규화 완료! CSV 저장 위치: {output_folder}/")
+    else:
+        print("❌ 정규화 실패!")
+        sys.exit(1)

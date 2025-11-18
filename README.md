@@ -1,77 +1,15 @@
-# 📊 생명공학육성시행계획 데이터 처리 시스템
+# 생명공학육성시행계획 PDF → Oracle DB 자동화 시스템
 
-> PDF → JSON → 정규화 → Oracle DB 적재 파이프라인
+## 📋 프로젝트 개요
 
-**작성일**: 2025-11-17  
-**버전**: 2.0
+본 프로젝트는 **생명공학육성시행계획 PDF 문서**를 자동으로 파싱하여 구조화된 데이터로 변환하고, Oracle 데이터베이스에 적재하는 전체 자동화 파이프라인입니다.
 
----
-
-## 📌 프로젝트 개요
-
-정부의 생명공학육성시행계획 PDF 문서를 자동으로 파싱하여 구조화된 데이터로 변환하고, 
-Oracle DB에 적재하는 완전 자동화 시스템입니다.
-
-### 🎯 주요 기능
-
-1. **PDF 파싱**: 복잡한 표 구조를 자동 인식 및 추출
-2. **JSON 변환**: 구조화된 JSON 형식으로 저장
-3. **데이터 정규화**: CSV 파일로 정규화 (관계형 DB 구조)
-4. **Oracle DB 적재**: 자동으로 테이블 생성 및 데이터 삽입
-5. **Excel 내보내기**: 검증용 엑셀 파일 생성
-
----
-
-## 🏗️ 시스템 아키텍처
-
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   PDF 문서   │ --> │ JSON 추출   │ --> │  정규화 CSV  │ --> │  Oracle DB  │
-│  (입력)     │     │ (구조화)    │     │ (관계형)    │     │  (최종)     │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-       │                   │                   │                   │
-       │                   │                   │                   │
-    input/            output/        normalized_output/         TB_PLAN_*
-    *.pdf           *.json              *.csv                  테이블들
-```
-
----
-
-## 📁 프로젝트 구조
-
-```
-PythonProject/
-├── 📄 main.py                          # 메인 실행 파일 (배치 모드)
-├── 📄 config.py                        # 설정 파일 (DB 접속 정보)
-│
-├── 🔧 핵심 모듈
-│   ├── extract_pdf_to_json.py          # PDF → JSON 변환
-│   ├── normalize_government_standard.py # JSON → CSV 정규화
-│   ├── load_oracle_db.py               # CSV → Oracle DB 적재
-│   └── oracle_db_manager.py            # Oracle DB 연결 관리
-│
-├── 📊 테이블 정의
-│   └── oracle_table_ddl.py             # Oracle 테이블 DDL 정의
-│
-├── 🛠️ 유틸리티
-│   ├── batch_processor.py              # 배치 처리 유틸
-│   ├── export_normalized_to_excel.py   # Excel 내보내기
-│   ├── check_json_csv_integrity.py     # 무결성 검사
-│   └── test_tb_plan_data_completeness.py # 완성도 테스트
-│
-├── 🌐 웹 인터페이스
-│   └── streamlit_app.py                # Streamlit 대시보드
-│
-├── 📂 데이터 디렉토리
-│   ├── input/                          # PDF 입력 파일
-│   ├── output/                         # JSON 출력 파일
-│   └── normalized_output_government/   # 정규화된 CSV 파일
-│
-└── 📚 문서
-    ├── README.md                       # 이 파일
-    ├── requirements.txt                # Python 패키지 목록
-    └── LICENSE                         # 라이센스
-```
+### 주요 기능
+- ✅ PDF 문서를 JSON으로 자동 변환 (OpenAI GPT-4 Vision API 활용)
+- ✅ JSON 데이터를 정부 표준 형식으로 정규화
+- ✅ Oracle DB 테이블 구조에 맞춰 CSV 생성
+- ✅ Oracle 데이터베이스에 자동 적재
+- ✅ 배치 처리 지원 (여러 PDF 동시 처리)
 
 ---
 
@@ -80,352 +18,677 @@ PythonProject/
 ### 1. 환경 설정
 
 ```bash
-# 가상환경 생성 및 활성화
-python -m venv .venv
-.venv\Scripts\activate  # Windows
+# 가상환경 활성화
+.venv\Scripts\activate
 
-# 패키지 설치
+# 패키지 설치 (이미 되어 있음)
 pip install -r requirements.txt
 ```
 
-### 2. 설정 파일 생성
+### 2. OpenAI API 키 설정
 
-```bash
-# config.sample.py를 복사하여 config.py 생성
-copy config.sample.py config.py
-
-# config.py 편집 (Oracle DB 접속 정보 입력)
+`.env` 파일을 생성하고 API 키를 입력:
+```
+OPENAI_API_KEY=your-api-key-here
 ```
 
-### 3. 전체 파이프라인 실행
+### 3. 실행
 
 ```bash
-# PDF → JSON → 정규화 → Oracle DB 적재 (한번에!)
+# 전체 파이프라인 실행 (input 폴더의 모든 PDF 처리)
 python main.py --batch
+
+# 특정 PDF 파일 처리
+python main.py input/2020년도_생명공학육성시행계획.pdf
+
+# DB 적재 건너뛰기 (CSV만 생성)
+python main.py --batch --skip-db
 ```
 
 ---
 
-## 📖 상세 사용법
+## 📂 프로젝트 구조
 
-### 1단계: PDF → JSON 변환
-
-```bash
-# 단일 파일 변환
-python extract_pdf_to_json.py input/2024년도_생명공학육성시행계획.pdf
-
-# 배치 모드 (폴더 내 모든 PDF)
-python main.py --batch
 ```
-
-**출력**: `output/*.json` 파일 생성
-
-### 2단계: JSON → CSV 정규화
-
-```bash
-# 단일 파일 정규화
-python normalize_government_standard.py output/파일명.json
-
-# 배치 모드는 main.py --batch에 포함됨
-```
-
-**출력**: `normalized_output_government/*.csv` 파일 생성
-- `sub_projects.csv` - 프로젝트 마스터
-- `normalized_overviews.csv` - 사업개요
-- `normalized_budgets.csv` - 예산 정보
-- `normalized_schedules.csv` - 일정 정보
-- `normalized_performances.csv` - 성과 정보
-
-### 3단계: Oracle DB 적재
-
-```bash
-# CSV → Oracle DB
-python load_oracle_db.py
-```
-
-**생성 테이블**:
-- `TB_PLAN_DATA` - 시행계획 마스터 (67% 필드 채움!)
-- `TB_PLAN_SCHEDULES` - 일정 상세
-- `TB_PLAN_BUDGETS` - 예산 상세
-- `TB_PLAN_PERFORMANCES` - 성과 상세
-
-### 4단계: Excel 내보내기 (선택)
-
-```bash
-# CSV를 Excel로 변환 (검증용)
-python export_normalized_to_excel.py
+PythonProject/
+├── input/                              # 📥 PDF 입력 폴더
+│   ├── 2020년도 생명공학육성시행계획.pdf
+│   ├── 2021년도 생명공학육성시행계획.pdf
+│   └── ...
+│
+├── output/                             # 📤 JSON 중간 결과
+│   ├── 2020년도 생명공학육성시행계획.json
+│   └── ...
+│
+├── normalized_output_government/       # 📊 최종 CSV 출력
+│   ├── TB_PLAN_MASTER.csv
+│   ├── TB_PLAN_DETAIL.csv
+│   ├── TB_PLAN_BUDGET.csv
+│   ├── TB_PLAN_SCHEDULE.csv
+│   ├── TB_PLAN_PERFORMANCE.csv
+│   └── raw_data.csv (감사용)
+│
+├── main.py                             # 🎯 메인 실행 파일
+├── extract_pdf_to_json.py              # 1단계: PDF → JSON 변환
+├── normalize_government_standard.py    # 2단계: JSON → CSV 정규화
+├── load_oracle_direct.py               # 3단계: CSV → Oracle DB 적재
+├── oracle_db_manager.py                # Oracle 연결 관리
+├── oracle_table_ddl.py                 # Oracle 테이블 DDL 정의
+├── batch_processor.py                  # 배치 처리 로직
+├── config.py                           # 설정 파일
+└── requirements.txt                    # Python 패키지 목록
 ```
 
 ---
 
-## 🗄️ 데이터베이스 구조
+## 🔄 데이터 처리 파이프라인
 
-### TB_PLAN_DATA (마스터 테이블)
+### 전체 흐름도
 
-**43개 컬럼 중 29개(67%) 자동 채움!** ✅
+```
+┌─────────────────┐
+│   PDF 문서      │  input/
+│ (정부 시행계획)  │
+└────────┬────────┘
+         │
+         ▼ (1단계: extract_pdf_to_json.py)
+┌─────────────────┐
+│   JSON 데이터   │  output/
+│  (구조화된 원본) │
+└────────┬────────┘
+         │
+         ▼ (2단계: normalize_government_standard.py)
+┌─────────────────┐
+│   CSV 파일      │  normalized_output_government/
+│  (Oracle 스키마) │
+└────────┬────────┘
+         │
+         ▼ (3단계: load_oracle_direct.py)
+┌─────────────────┐
+│   Oracle DB     │
+│  (최종 저장소)   │
+└─────────────────┘
+```
 
-#### ✅ 기본 정보 (7개)
-- `PLAN_ID` - 시행계획 ID (예: 2024001)
-- `YEAR` - 문서 연도
-- `NUM` - 순번
-- `NATION_ORGAN_NM` - 부처명
-- `DETAIL_BIZ_NM` - 내역사업명
-- `BIZ_NM` - 세부사업명
-- `REGIST_ID` - 등록자
+### 1단계: PDF → JSON 변환 (`extract_pdf_to_json.py`)
 
-#### ✅ 사업 상세 (6개)
-- `BIZ_TYPE` - 사업유형
-- `REP_FLD` - 대표분야
-- `LEAD_ORGAN_NM` - 주관기관명
-- `MNG_ORGAN_NM` - 관리기관명
-- `LAST_GOAL` - 최종목표
-- `BIZ_CONTENTS` - 사업내용
+**목적:** PDF 문서를 구조화된 JSON으로 변환
 
-#### ✅ 사업 기간 (2개)
-- `BIZ_SDT` - 사업 시작일
-- `BIZ_EDT` - 사업 종료일
+**기술:**
+- OpenAI GPT-4 Vision API 사용
+- 페이지별로 이미지로 변환 후 텍스트 추출
+- 테이블 구조 인식 및 파싱
 
-#### �� 예산 정보 (8개)
-- `TOTAL_RESPRC` - 총 연구비
-- `TOTAL_RESPRC_GOV` - 총 정부 연구비
-- `TOTAL_RESPRC_CIV` - 총 민간 연구비
-- `CUR_RESPRC` - 현재연도 연구비
-- `CUR_RESPRC_GOV` - 현재연도 정부 연구비
-- `CUR_RESPRC_CIV` - 현재연도 민간 연구비
-- `PERFORM_PRC` - 실적 비용
-- `PLAN_PRC` - 계획 비용
+**출력 예시:**
+```json
+{
+  "metadata": {
+    "document_year": 2020,
+    "title": "2020년도 생명공학육성시행계획"
+  },
+  "pages": [
+    {
+      "page_number": 1,
+      "category": "overview",
+      "sub_project": "신약개발",
+      "full_text": "...",
+      "tables": [...]
+    }
+  ]
+}
+```
 
-#### ❌ NULL 필드 (14개)
-- 3대 영역 및 비중 (8개): AREA, BIOLOGY_WEI, RED_WEI, GREEN_WEI, WHITE_WEI, FUSION_WEI, REGUL_WEI, WEI
-- 연구기간 (2개): RESPERIOD, CUR_RESPERIOD
-- 기타 (4개): BIZ_CONTENTS_KEYWORD, MODIFY_ID, MODIFY_DT, DELETE_YN 등
+### 2단계: JSON → CSV 정규화 (`normalize_government_standard.py`)
+
+**목적:** JSON 데이터를 Oracle DB 테이블 구조에 맞춰 정규화
+
+**처리 내용:**
+- 내역사업(프로젝트) 식별 및 PLAN_ID 생성
+- 사업개요, 예산, 일정, 성과 데이터 추출
+- Oracle 스키마에 맞춰 CSV 생성
+
+**주요 로직:**
+```python
+# PLAN_ID 생성: 년도 + 3자리 일련번호
+PLAN_ID = f"{year}{seq:03d}"  # 예: 2020001, 2020002, ...
+
+# 데이터 분류
+- TB_PLAN_MASTER:      마스터 정보 (1개 사업당 1건)
+- TB_PLAN_DETAIL:      상세 정보 (1:1)
+- TB_PLAN_BUDGET:      예산 정보 (1:N, 연도별)
+- TB_PLAN_SCHEDULE:    일정 정보 (1:N, 분기별)
+- TB_PLAN_PERFORMANCE: 성과 정보 (1:N, 항목별)
+```
+
+### 3단계: CSV → Oracle DB 적재 (`load_oracle_direct.py`)
+
+**목적:** CSV 데이터를 Oracle 데이터베이스에 적재
+
+**처리 순서:**
+1. 기존 데이터 TRUNCATE (중복 방지)
+2. TB_PLAN_MASTER 적재 (부모 테이블)
+3. TB_PLAN_DETAIL, BUDGET, SCHEDULE, PERFORMANCE 적재 (자식 테이블)
+4. Foreign Key 자동 연결
 
 ---
 
-## 🎨 주요 특징
+## 🗄️ Oracle 데이터베이스 구조
 
-### 1. **하드코딩 제거**
-- ✅ 모든 연도 관련 하드코딩 제거
-- ✅ PDF 파일명에서 자동 연도 추출
-- ✅ 2020~2024년 (그리고 미래 모든 연도) 자동 처리
+### ERD (Entity Relationship Diagram)
 
-### 2. **NULL 최소화**
-- ✅ 여러 CSV를 조인하여 TB_PLAN_DATA 67% 채움
-- ✅ 기존 16% → 개선 후 67% (51% 향상!)
-
-### 3. **병렬 처리**
-- ✅ PDF 페이지별 병렬 처리 (속도 3배 향상)
-- ✅ 멀티프로세싱 지원
-
-### 4. **오류 처리**
-- ✅ 각 레코드별 개별 처리 (하나 실패해도 계속 진행)
-- ✅ 상세한 로그 및 오류 리포트
-
-### 5. **데이터 검증**
-- ✅ JSON-CSV 무결성 검사
-- ✅ 완성도 테스트 스크립트
+```
+┌──────────────────────┐
+│   TB_PLAN_MASTER     │ ◄── 마스터 테이블 (핵심)
+│ ──────────────────── │
+│ PK: PLAN_ID          │
+│     YEAR             │
+│     NATION_ORGAN_NM  │
+│     BIZ_NM           │
+│     DETAIL_BIZ_NM    │
+└──────────┬───────────┘
+           │
+           │ 1:1
+           ├──────────────────►┌──────────────────────┐
+           │                   │   TB_PLAN_DETAIL     │
+           │                   │ ──────────────────── │
+           │                   │ FK: PLAN_ID          │
+           │                   │     BIZ_TYPE         │
+           │                   │     REP_FLD          │
+           │                   │     LAST_GOAL        │
+           │                   │     BIZ_CONTENTS     │
+           │                   └──────────────────────┘
+           │
+           │ 1:N
+           ├──────────────────►┌──────────────────────┐
+           │                   │   TB_PLAN_BUDGET     │
+           │                   │ ──────────────────── │
+           │                   │ FK: PLAN_ID          │
+           │                   │     BUDGET_YEAR      │
+           │                   │     TOTAL_AMOUNT     │
+           │                   │     GOV_AMOUNT       │
+           │                   └──────────────────────┘
+           │
+           │ 1:N
+           ├──────────────────►┌──────────────────────┐
+           │                   │  TB_PLAN_SCHEDULE    │
+           │                   │ ──────────────────── │
+           │                   │ FK: PLAN_ID          │
+           │                   │     SCHEDULE_YEAR    │
+           │                   │     QUARTER          │
+           │                   │     TASK_NAME        │
+           │                   └──────────────────────┘
+           │
+           │ 1:N
+           └──────────────────►┌──────────────────────┐
+                               │ TB_PLAN_PERFORMANCE  │
+                               │ ──────────────────── │
+                               │ FK: PLAN_ID          │
+                               │     PERFORMANCE_YEAR │
+                               │     PERFORMANCE_TYPE │
+                               │     VALUE            │
+                               └──────────────────────┘
+```
 
 ---
 
-## 📊 성능 및 통계
+## 📊 CSV 파일 상세 설명
 
-### 처리 속도
-- **PDF 파싱**: ~100 페이지/분
-- **정규화**: ~1000 레코드/초
-- **DB 적재**: ~500 레코드/초
+### 1️⃣ TB_PLAN_MASTER.csv (마스터 테이블)
 
-### 데이터 정확도
-- **필드 채움률**: 67% (29/43 필드)
-- **데이터 매칭률**: 95%+
-- **오류율**: <1%
+**역할:** 각 사업(내역사업)의 기본 정보를 저장하는 핵심 테이블
+
+| 컬럼명 | 타입 | 설명 | 예시 |
+|--------|------|------|------|
+| **PLAN_ID** | CHAR(30) | 🔑 시행계획 고유 ID (Primary Key) | 2020001 |
+| **YEAR** | NUMBER(4) | 📅 계획 연도 | 2020 |
+| **NUM** | NUMBER | 🔢 순번 | 1 |
+| **NATION_ORGAN_NM** | VARCHAR2(768) | 🏛️ 부처명 | 과학기술정보통신부 |
+| **BIZ_NM** | VARCHAR2(768) | 📋 세부사업명 | 바이오·의료기술개발사업 |
+| **DETAIL_BIZ_NM** | VARCHAR2(768) | 📝 내역사업명 | 신약개발 |
+
+**샘플 데이터:**
+```csv
+PLAN_ID,YEAR,NUM,NATION_ORGAN_NM,BIZ_NM,DETAIL_BIZ_NM
+2020001,2020,1,과학기술정보통신부,바이오·의료기술개발사업,신약개발
+2020002,2020,2,과학기술정보통신부,바이오·의료기술개발사업,차세대바이오
+```
+
+**활용:**
+- 모든 테이블의 기준이 되는 마스터 데이터
+- PLAN_ID로 다른 테이블과 연결
+- 부처별, 사업별 검색의 기준
 
 ---
 
-## 🔧 설정 옵션
+### 2️⃣ TB_PLAN_DETAIL.csv (상세 정보)
 
-### config.py
+**역할:** 사업의 상세 정보 (목표, 내용, 관리기관 등)
+
+| 컬럼명 | 타입 | 설명 | 예시 |
+|--------|------|------|------|
+| **DETAIL_ID** | CHAR(30) | 🔑 상세정보 ID | 2020001D01 |
+| **PLAN_ID** | CHAR(30) | 🔗 시행계획 ID (Foreign Key) | 2020001 |
+| **BIZ_TYPE** | VARCHAR2(768) | 📌 사업 유형 | 연구개발 |
+| **REP_FLD** | VARCHAR2(768) | 🎯 대표 분야 | 신약 |
+| **AREA** | VARCHAR2(768) | 🌐 3대 영역 | 레드바이오 |
+| **LEAD_ORGAN_NM** | VARCHAR2(768) | 🏢 주관 기관명 | 한국보건산업진흥원 |
+| **MNG_ORGAN_NM** | VARCHAR2(768) | 🏛️ 관리 기관명 | 보건복지부 |
+| **BIZ_SDT** | DATE | 📆 사업 시작일 | 2020-01-01 |
+| **BIZ_EDT** | DATE | 📆 사업 종료일 | 2024-12-31 |
+| **RESPERIOD** | VARCHAR2(768) | ⏱️ 연구기간 | 5년 |
+| **CUR_RESPERIOD** | VARCHAR2(768) | ⏱️ 현재 연구기간 | 3차년도 |
+| **LAST_GOAL** | VARCHAR2(4000) | 🎯 최종 목표 | 혁신신약 후보물질 10건 발굴 |
+| **BIZ_CONTENTS** | VARCHAR2(4000) | 📄 사업 내용 | 표적기반 신약 개발 연구... |
+| **BIZ_CONTENTS_KEYWORD** | VARCHAR2(4000) | 🏷️ 키워드 | 신약, 임상, 후보물질 |
+
+**관계:** TB_PLAN_MASTER와 **1:1 관계**
+
+---
+
+### 3️⃣ TB_PLAN_BUDGET.csv (예산 정보)
+
+**역할:** 연도별 예산 집행 내역 (실적/계획 구분)
+
+| 컬럼명 | 타입 | 설명 | 예시 |
+|--------|------|------|------|
+| **PLAN_ID** | CHAR(30) | 🔗 시행계획 ID | 2020001 |
+| **BUDGET_YEAR** | NUMBER(4) | 📅 예산 연도 | 2020 |
+| **CATEGORY** | VARCHAR2(50) | 📊 구분 | 실적 / 계획 |
+| **TOTAL_AMOUNT** | NUMBER | 💰 총액 (백만원) | 55515.0 |
+| **GOV_AMOUNT** | NUMBER | 🏛️ 정부 예산 | 55515.0 |
+| **PRIVATE_AMOUNT** | NUMBER | 🏢 민간 예산 | 0 |
+| **LOCAL_AMOUNT** | NUMBER | 🏘️ 지방비 | 0 |
+| **ETC_AMOUNT** | NUMBER | 📦 기타 | 0 |
+| **PERFORM_PRC** | NUMBER | ✅ 실적 비용 | 55515.0 |
+| **PLAN_PRC** | NUMBER | 📋 계획 비용 | NULL |
+
+**샘플 데이터:**
+```csv
+PLAN_ID,BUDGET_YEAR,CATEGORY,TOTAL_AMOUNT,GOV_AMOUNT,PRIVATE_AMOUNT
+2020001,2017,실적,55515.0,55515.0,
+2020001,2018,실적,44275.5,44275.5,
+2020001,2019,실적,41963.0,41963.0,
+2020001,2020,계획,50000.0,45000.0,5000.0
+```
+
+**관계:** TB_PLAN_MASTER와 **1:N 관계** (한 사업당 여러 연도 예산)
+
+**특징:**
+- 과거 연도는 "실적"
+- 당해 연도는 "계획"
+- 정부/민간/지방비/기타로 분리 집계
+
+---
+
+### 4️⃣ TB_PLAN_SCHEDULE.csv (일정 정보)
+
+**역할:** 사업 추진 일정 (분기별 계획)
+
+| 컬럼명 | 타입 | 설명 | 예시 |
+|--------|------|------|------|
+| **PLAN_ID** | CHAR(30) | 🔗 시행계획 ID | 2020001 |
+| **SCHEDULE_YEAR** | NUMBER(4) | 📅 일정 연도 | 2020 |
+| **QUARTER** | VARCHAR2(50) | 📊 분기 | 1/4분기 |
+| **TASK_NAME** | VARCHAR2(768) | 📝 과제명 | 리더연구 |
+| **TASK_CONTENT** | VARCHAR2(4000) | 📄 세부 내용 | • 리더연구\n- 신약 후보물질 발굴\n- 전임상 시험 |
+| **START_DATE** | DATE | 📆 시작일 | 2020-01-01 |
+| **END_DATE** | DATE | 📆 종료일 | 2020-03-31 |
+
+**관계:** TB_PLAN_MASTER와 **1:N 관계** (한 사업당 여러 분기 일정)
+
+**특징:**
+- **실제 월 정보 우선 파싱** ✨
+  - "1월~3월" → START_DATE: 2020-01-01, END_DATE: 2020-03-31
+  - "4월~6월" → START_DATE: 2020-04-01, END_DATE: 2020-06-30
+  - "2020.1 ~ 2020.5" → START_DATE: 2020-01-01, END_DATE: 2020-05-31
+- **분기 정보로 대체**
+  - "1/4분기" → START_DATE: 2020-01-01, END_DATE: 2020-03-31
+  - "1/4분기~2/4분기" → 각 분기별로 분리 저장
+- 연중 계획은 QUARTER='연중', START_DATE: 2020-01-01, END_DATE: 2020-12-31
+- 과제별로 상세 내용 저장
+
+---
+
+### 5️⃣ TB_PLAN_PERFORMANCE.csv (성과 정보)
+
+**역할:** 사업 성과 실적 (특허, 논문, 인력 등)
+
+| 컬럼명 | 타입 | 설명 | 예시 |
+|--------|------|------|------|
+| **PLAN_ID** | CHAR(30) | 🔗 시행계획 ID | 2020001 |
+| **PERFORMANCE_YEAR** | NUMBER(4) | 📅 실적 연도 | 2019 |
+| **PERFORMANCE_TYPE** | VARCHAR2(100) | 📊 성과 유형 | 특허 / 논문 / 인력양성 |
+| **CATEGORY** | VARCHAR2(200) | 🏷️ 세부 항목 | 국내출원 / SCIE / 박사 |
+| **VALUE** | NUMBER | 🔢 실적 값 | 15 |
+| **UNIT** | VARCHAR2(50) | 📏 단위 | 건 / 편 / 명 |
+| **ORIGINAL_TEXT** | VARCHAR2(4000) | 📝 원본 텍스트 | [추적용 원본 데이터] |
+
+**성과 유형 분류:**
+
+**1) 특허 (PERFORMANCE_TYPE = '특허')**
+- 국내출원
+- 국내등록
+- 국외출원
+- 국외등록
+
+**2) 논문 (PERFORMANCE_TYPE = '논문')**
+- IF20이상
+- IF10이상
+- SCIE
+- 비SCIE
+
+**3) 인력양성 (PERFORMANCE_TYPE = '인력양성')**
+- 박사
+- 석사
+- 학사
+- 기타
+
+**4) 정성적 실적 (PERFORMANCE_TYPE = '정성적실적')** ✨
+- CATEGORY: '추진실적'
+- VALUE: NULL (정량값 없음)
+- ORIGINAL_TEXT: 실적 내용 전체 (예: "신약 후보물질 3건 발굴 및 전임상 진행 중")
+- **용도:** 텍스트 기반 성과 추적, 정량화할 수 없는 실적 기록
+
+**샘플 데이터:**
+```csv
+PLAN_ID,PERFORMANCE_YEAR,PERFORMANCE_TYPE,CATEGORY,VALUE,UNIT
+2020001,2019,특허,국내출원,15,건
+2020001,2019,특허,국내등록,8,건
+2020001,2019,논문,SCIE,23,편
+2020001,2019,인력양성,박사,5,명
+```
+
+**관계:** TB_PLAN_MASTER와 **1:N 관계** (한 사업당 여러 성과 항목)
+
+**특징:**
+- ORIGINAL_TEXT에 원본 데이터 저장 (검증 및 추적용)
+- 연도별, 유형별, 세부항목별로 세분화
+- 숫자형 VALUE로 통계 분석 가능
+
+---
+
+### 6️⃣ raw_data.csv (원본 데이터 - 감사용)
+
+**역할:** JSON에서 추출한 원본 데이터를 그대로 보관 (감사 추적용)
+
+| 컬럼명 | 설명 |
+|--------|------|
+| id | 레코드 ID |
+| data_type | 데이터 유형 (overview, performance, schedule, budget) |
+| data_year | 데이터 연도 |
+| raw_content | 원본 JSON 텍스트 |
+| page_number | PDF 페이지 번호 |
+| table_index | 테이블 인덱스 |
+| created_at | 생성 시각 |
+
+**특징:**
+- Oracle DB에는 적재하지 않음 (CSV만 보관)
+- 데이터 검증 및 문제 추적용
+- 원본 PDF와 매핑 가능
+
+---
+
+## 🔍 데이터 검색 및 활용 예시
+
+### SQL 쿼리 예시
+
+```sql
+-- 1. 부처별 사업 목록 조회
+SELECT YEAR, DETAIL_BIZ_NM, BIZ_NM
+FROM TB_PLAN_MASTER
+WHERE NATION_ORGAN_NM = '과학기술정보통신부'
+ORDER BY YEAR, NUM;
+
+-- 2. 특정 사업의 연도별 예산 추이
+SELECT BUDGET_YEAR, CATEGORY, TOTAL_AMOUNT, GOV_AMOUNT
+FROM TB_PLAN_BUDGET
+WHERE PLAN_ID = '2020001'
+ORDER BY BUDGET_YEAR;
+
+-- 3. 2020년 사업의 성과 집계 (특허)
+SELECT m.DETAIL_BIZ_NM, p.CATEGORY, SUM(p.VALUE) as 총건수
+FROM TB_PLAN_PERFORMANCE p
+JOIN TB_PLAN_MASTER m ON p.PLAN_ID = m.PLAN_ID
+WHERE m.YEAR = 2020 AND p.PERFORMANCE_TYPE = '특허'
+GROUP BY m.DETAIL_BIZ_NM, p.CATEGORY;
+
+-- 4. 사업별 일정 조회
+SELECT s.SCHEDULE_YEAR, s.QUARTER, s.TASK_NAME, s.TASK_CONTENT
+FROM TB_PLAN_SCHEDULE s
+JOIN TB_PLAN_MASTER m ON s.PLAN_ID = m.PLAN_ID
+WHERE m.DETAIL_BIZ_NM = '신약개발'
+ORDER BY s.SCHEDULE_YEAR, s.QUARTER;
+
+-- 5. 사업 상세 정보와 함께 조회 (JOIN)
+SELECT 
+    m.PLAN_ID,
+    m.YEAR,
+    m.DETAIL_BIZ_NM,
+    d.LAST_GOAL,
+    d.BIZ_CONTENTS,
+    d.LEAD_ORGAN_NM
+FROM TB_PLAN_MASTER m
+LEFT JOIN TB_PLAN_DETAIL d ON m.PLAN_ID = d.PLAN_ID
+WHERE m.YEAR = 2020;
+```
+
+---
+
+## ⚙️ 주요 Python 파일 설명
+
+### 1. `main.py` - 전체 파이프라인 제어
 
 ```python
-# Oracle DB 설정
+class PDFtoDBPipeline:
+    def run(self):
+        # 1. PDF → JSON
+        self.extract_pdfs_to_json()
+        
+        # 2. JSON → CSV
+        self.normalize_json_to_csv()
+        
+        # 3. CSV → Oracle DB
+        self.load_to_database()
+```
+
+**주요 기능:**
+- 전체 파이프라인 오케스트레이션
+- 에러 핸들링 및 통계 수집
+- 배치 처리 지원
+
+---
+
+### 2. `extract_pdf_to_json.py` - PDF 파싱
+
+**핵심 로직:**
+```python
+def extract_pdf_to_json(pdf_path, output_path):
+    # PDF��� 페이지별 이미지로 변환
+    images = convert_pdf_to_images(pdf_path)
+    
+    # OpenAI Vision API로 텍스트 추출
+    for page_num, image in enumerate(images):
+        text = call_openai_vision_api(image)
+        pages.append({
+            'page_number': page_num,
+            'text': text,
+            'tables': extract_tables(text)
+        })
+    
+    # JSON으로 저장
+    save_as_json(output_path, pages)
+```
+
+---
+
+### 3. `normalize_government_standard.py` - 데이터 정규화
+
+**핵심 클래스:**
+```python
+class GovernmentStandardNormalizer:
+    def normalize(self, json_data):
+        # 내역사업 식별 및 PLAN_ID 생성
+        for page in json_data['pages']:
+            if '내역사업명' in page:
+                plan_id = self.create_plan_id()
+                
+        # 데이터 분류 및 정규화
+        self.extract_overview()      # → TB_PLAN_DETAIL
+        self.extract_budget()        # → TB_PLAN_BUDGET
+        self.extract_schedule()      # → TB_PLAN_SCHEDULE
+        self.extract_performance()   # → TB_PLAN_PERFORMANCE
+        
+    def save_to_csv(self):
+        # Oracle 스키마에 맞춰 CSV 저장
+```
+
+---
+
+### 4. `load_oracle_direct.py` - DB 적재
+
+**핵심 로직:**
+```python
+class OracleDirectLoader:
+    def load_all_tables(self):
+        # 기존 데이터 삭제 (중복 방지)
+        self.truncate_tables()
+        
+        # 순서대로 적재 (FK 관계 고려)
+        self.load_tb_plan_master()      # 1. 마스터
+        self.load_tb_plan_detail()      # 2. 상세
+        self.load_tb_plan_budget()      # 3. 예산
+        self.load_tb_plan_schedule()    # 4. 일정
+        self.load_tb_plan_performance() # 5. 성과
+```
+
+---
+
+### 5. `config.py` - 설정 관리
+
+```python
+# Oracle 접속 정보
 ORACLE_CONFIG = {
-    'user': 'your_username',
-    'password': 'your_password',
-    'dsn': 'localhost:1521/XEPDB1'
+    "host": "192.168.73.208",
+    "port": 1521,
+    "sid": "bics",
+    "user": "bics_dev",
+    "password": "bics_dev"
 }
 
 # 디렉토리 설정
-INPUT_DIR = "input"
-OUTPUT_DIR = "output"
-NORMALIZED_OUTPUT_DIR = "normalized_output_government"
-
-# 처리 옵션
-MAX_WORKERS = 4  # 병렬 처리 워커 수
-BATCH_SIZE = 100  # DB 커밋 주기
+INPUT_DIR = "input/"
+OUTPUT_DIR = "output/"
+NORMALIZED_OUTPUT_GOVERNMENT_DIR = "normalized_output_government/"
 ```
 
 ---
 
-## 🧪 테스트 및 검증
+## 🛠️ 문제 해결 (Troubleshooting)
 
-### 1. 무결성 검사
+### 1. `ORA-00001: unique constraint violated`
+
+**원인:** DB에 이미 같은 PLAN_ID 데이터가 존재
+
+**해결:**
+```python
+# load_oracle_direct.py에서 자동으로 TRUNCATE 수행
+# 재실행하면 자동 해결됨
+python main.py --batch
+```
+
+---
+
+### 2. OpenAI API 에러
+
+**증상:** `openai.error.AuthenticationError`
+
+**해결:**
+1. `.env` 파일에 올바른 API 키 입력
+2. API 키 유효성 확인
+3. 크레딧 잔액 확인
+
+---
+
+### 3. Oracle 연결 실패
+
+**증상:** `ORA-12541: TNS:no listener`
+
+**해결:**
+1. Oracle 서버 실행 확인
+2. `config.py`에서 host/port 확인
+3. 네트워크 연결 확인
+4. 방화벽 설정 확인
+
+---
+
+### 4. CSV 인코딩 문제
+
+**증상:** 한글이 깨져 보임
+
+**해결:**
+- 모든 CSV는 **UTF-8 BOM** 인코딩으로 저장됨
+- Excel에서 열 때: 데이터 → 텍스트 나누기 → UTF-8 선택
+
+---
+
+## 📈 성능 최적화
+
+### 배치 처리
 
 ```bash
-python check_json_csv_integrity.py
+# 10개씩 묶어서 병렬 처리 (4개 워커)
+python main.py --batch --batch-size 10 --max-workers 4
 ```
 
-### 2. 완성도 테스트
+### DB 인덱스
 
-```bash
-python test_tb_plan_data_completeness.py
-```
-
-### 3. DB 결과 확인
-
-```sql
--- 전체 통계
-SELECT 
-    COUNT(*) as total_records,
-    COUNT(BIZ_TYPE) as has_biz_type,
-    COUNT(REP_FLD) as has_field,
-    COUNT(TOTAL_RESPRC) as has_budget,
-    COUNT(BIZ_SDT) as has_start_date,
-    COUNT(LAST_GOAL) as has_goal
-FROM TB_PLAN_DATA;
-
--- 샘플 데이터 조회
-SELECT 
-    PLAN_ID, YEAR, DETAIL_BIZ_NM,
-    BIZ_TYPE, REP_FLD, LEAD_ORGAN_NM,
-    TOTAL_RESPRC, BIZ_SDT, BIZ_EDT
-FROM TB_PLAN_DATA
-WHERE YEAR = 2024
-ORDER BY NUM
-FETCH FIRST 10 ROWS ONLY;
-
--- 연도별 통계
-SELECT 
-    YEAR,
-    COUNT(*) as project_count,
-    SUM(TOTAL_RESPRC) as total_budget
-FROM TB_PLAN_DATA
-GROUP BY YEAR
-ORDER BY YEAR;
-```
+테이블에 자동으로 인덱스가 생성되어 검색 성능 최적화:
+- `IDX_MASTER_YEAR`: 연도별 검색
+- `IDX_MASTER_DEPT`: 부처별 검색
+- `IDX_BUDGET_YEAR`: 예산 연도별 검색
+- `IDX_PERFORMANCE_TYPE`: 성과 유형별 검색
 
 ---
 
-## 🐛 문제 해결
+## 📝 데이터 품질 보장
 
-### 1. PDF 파싱 오류
-```
-문제: "페이지 처리 실패"
-해결: PDF 파일이 손상되지 않았는지 확인
-     Adobe Acrobat으로 다시 저장 시도
-```
+### 검증 항목
 
-### 2. Oracle 연결 오류
-```
-문제: "ORA-12541: TNS:no listener"
-해결: 1. Oracle 서비스 실행 확인
-     2. config.py의 DSN 확인
-     3. tnsnames.ora 설정 확인
-```
+1. **PLAN_ID 중복 없음**
+   - 년도 + 일련번호로 고유성 보장
 
-### 3. 인코딩 오류
-```
-문제: "UnicodeDecodeError"
-해결: CSV 파일은 UTF-8-BOM으로 저장됨
-     pandas.read_csv(..., encoding='utf-8-sig') 사용
-```
+2. **Foreign Key 무결성**
+   - 모든 자식 테이블의 PLAN_ID가 마스터에 존재
 
-### 4. 메모리 부족
-```
-문제: "MemoryError"
-해결: 1. MAX_WORKERS 값을 줄임 (4 → 2)
-     2. 대용량 PDF는 분할 처리
-     3. 가상 메모리 증가
-```
+3. **필수 컬럼 NOT NULL**
+   - NATION_ORGAN_NM, BIZ_NM은 필수
+
+4. **데이터 타입 검증**
+   - 금액은 NUMBER, 날짜는 DATE 형식
 
 ---
 
-## 💡 향후 개선 계획
+## 🎯 향후 개선 사항
 
-### Phase 1: 자동 분류 (우선순위: 높음)
-- [ ] 3대 영역(레드/그린/화이트) 자동 분류
-- [ ] 키워드 기반 분류 알고리즘
-- [ ] ML 모델 학습 및 적용
-
-### Phase 2: 연구기간 자동 계산
-- [ ] BIZ_SDT, BIZ_EDT로부터 RESPERIOD 자동 계산
-- [ ] "n년" 형식 자동 생성
-
-### Phase 3: 키워드 자동 추출
-- [ ] KoNLPy를 활용한 형태소 분석
-- [ ] BIZ_CONTENTS에서 주요 키워드 추출
-- [ ] TF-IDF 기반 중요도 계산
-
-### Phase 4: 테이블 정규화 (장기)
-- [ ] TB_PLAN_DATA 분리 (마스터 정보만)
-- [ ] VIEW를 통한 집계 데이터 처리
-- [ ] 데이터 중복 제거
-
-### Phase 5: 웹 대시보드 개선
-- [ ] Streamlit 대시보드 고도화
-- [ ] 실시간 진행률 표시
-- [ ] 대화형 데이터 시각화
-
----
-
-## 📚 기술 스택
-
-### Core
-- Python 3.13+
-- pandas 2.x
-- PyMuPDF (fitz) - PDF 파싱
-- pdfplumber - 표 추출
-- cx_Oracle - Oracle DB 연동
-
-### Optional
-- Streamlit - 웹 대시보드
-- openpyxl - Excel 내보내기
-- KoNLPy - 한국어 자연어 처리
-
----
-
-## 📝 주요 개선 내역
-
-### v2.0 (2025-11-17)
-- ✅ TB_PLAN_DATA NULL 최소화 (16% → 67%)
-- ✅ 하드코딩 완전 제거
-- ✅ 병렬 처리 성능 개선
-- ✅ 문서 통합 및 정리
-
-### v1.0 (2025-11-16)
-- ✅ PDF → JSON → CSV → Oracle 파이프라인 구축
-- ✅ 정규화 로직 구현
-- ✅ Oracle DB 자동 생성
-
----
-
-## 🤝 기여 및 라이센스
-
-### 기여 방법
-1. Fork the repository
-2. Create your feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
-
-### 라이센스
-이 프로젝트는 MIT 라이센스를 따릅니다.
+- [ ] 웹 대시보드 추가 (Streamlit)
+- [ ] 데이터 검증 자동화
+- [ ] 증분 업데이트 지원 (전체 TRUNCATE 대신)
+- [ ] 로깅 고도화 (파일 로그)
+- [ ] 단위 테스트 추가
 
 ---
 
 ## 📞 문의
 
-프로젝트에 대한 질문이나 제안사항이 있으시면 이슈를 등록해주세요.
+프로젝트 관련 문의사항이 있으시면 이슈를 등록해주세요.
 
-**최종 업데이트**: 2025-11-17  
-**개발자**: GitHub Copilot with Human  
-**버전**: 2.0
+---
+
+## 📄 라이선스
+
+이 프로젝트는 내부 사용 목적으로 제작되었습니다.
+
+---
+
+**마지막 업데이트:** 2025-11-18
 

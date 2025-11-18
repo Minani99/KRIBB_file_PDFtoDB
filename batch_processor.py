@@ -33,25 +33,35 @@ class BatchPDFProcessor:
 
     def __init__(
         self,
-        input_dir: str = "input",
-        output_dir: str = "output",
-        batch_size: int = 10,
-        max_workers: int = 4,
-        use_multiprocessing: bool = True
+        input_dir: str = None,
+        output_dir: str = None,
+        batch_size: int = None,
+        max_workers: int = None,
+        use_multiprocessing: bool = None
     ):
         """
         Args:
-            input_dir: 입력 PDF 디렉토리
-            output_dir: 출력 디렉토리
-            batch_size: 배치당 처리할 파일 수
-            max_workers: 병렬 작업자 수
-            use_multiprocessing: True=프로세스, False=쓰레드
+            input_dir: 입력 PDF 디렉토리 (None이면 config 사용)
+            output_dir: 출력 디렉토리 (None이면 config 사용)
+            batch_size: 배치당 처리할 파일 수 (None이면 config 사용)
+            max_workers: 병렬 작업자 수 (None이면 config 사용)
+            use_multiprocessing: True=프로세스, False=쓰레드 (None이면 config 사용)
         """
-        self.input_dir = Path(input_dir)
-        self.output_dir = Path(output_dir)
-        self.batch_size = batch_size
-        self.max_workers = max_workers
-        self.use_multiprocessing = use_multiprocessing
+        # config에서 기본값 가져오기
+        try:
+            from config import INPUT_DIR, OUTPUT_DIR, BATCH_SIZE, MAX_WORKERS, USE_MULTIPROCESSING
+            self.input_dir = Path(input_dir) if input_dir else INPUT_DIR
+            self.output_dir = Path(output_dir) if output_dir else OUTPUT_DIR
+            self.batch_size = batch_size if batch_size is not None else BATCH_SIZE
+            self.max_workers = max_workers if max_workers is not None else MAX_WORKERS
+            self.use_multiprocessing = use_multiprocessing if use_multiprocessing is not None else USE_MULTIPROCESSING
+        except ImportError:
+            # config 없으면 기본값 사용
+            self.input_dir = Path(input_dir) if input_dir else Path("input")
+            self.output_dir = Path(output_dir) if output_dir else Path("output")
+            self.batch_size = batch_size if batch_size is not None else 10
+            self.max_workers = max_workers if max_workers is not None else 4
+            self.use_multiprocessing = use_multiprocessing if use_multiprocessing is not None else False
 
         # 통계
         self.stats = {
