@@ -35,3 +35,9 @@ plotly==5.24.1  # 인터랙티브 차트
 # Advanced PDF Processing (Optional)
 # ==================================
 # docling  # 고급 PDF 분석 (별도 설치 필요)
+
+# Additional Tools
+# ================
+tabulate==0.9.0  # 테이블 출력
+python-dotenv==1.0.0  # 환경 변수 관리
+openpyxl==3.1.2  # Excel 파일 처리
