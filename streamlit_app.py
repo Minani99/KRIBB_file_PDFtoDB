@@ -28,6 +28,15 @@ st.set_page_config(
     layout="wide"
 )
 
+SERVER_INPUT_DIR = Path(INPUT_DIR).resolve()
+SERVER_OUTPUT_DIR = Path(OUTPUT_DIR).resolve()
+SERVER_NORMALIZED_DIR = Path(NORMALIZED_OUTPUT_GOVERNMENT_DIR).resolve()
+
+# 서버에서 디렉토리 생성 (앱 시작 시 한 번만)
+SERVER_INPUT_DIR.mkdir(exist_ok=True)
+SERVER_OUTPUT_DIR.mkdir(exist_ok=True)
+SERVER_NORMALIZED_DIR.mkdir(exist_ok=True)
+
 # 세션 상태 초기화
 if 'processing_results' not in st.session_state:
     st.session_state.processing_results = []
@@ -38,12 +47,12 @@ if 'db_stats' not in st.session_state:
 
 
 def save_uploaded_files(uploaded_files):
-    """업로드된 파일 저장"""
-    INPUT_DIR.mkdir(exist_ok=True)
+    """업로드된 파일 저장 (서버 컴퓨터에 저장)"""
+    SERVER_INPUT_DIR.mkdir(exist_ok=True)
 
     saved_files = []
     for file in uploaded_files:
-        file_path = INPUT_DIR / file.name
+        file_path = SERVER_INPUT_DIR / file.name
         with open(file_path, 'wb') as f:
             f.write(file.getbuffer())
         saved_files.append(file_path)
@@ -52,115 +61,250 @@ def save_uploaded_files(uploaded_files):
 
 
 def process_single_pdf(pdf_path, progress_callback=None):
-    """단일 PDF 처리"""
+    """단일 PDF 처리 (서버에서 실행)"""
     try:
         # OUTPUT_DIR 생성 확인
-        OUTPUT_DIR.mkdir(exist_ok=True)
+        SERVER_OUTPUT_DIR.mkdir(exist_ok=True)
 
         # 1. PDF → JSON
         if progress_callback:
             progress_callback(f"📄 {pdf_path.name} - PDF 파싱 중...")
 
+        # PDF 파일 존재 확인
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"PDF 파일이 없습니다: {pdf_path}")
+
+        # PDF 파일 크기 확인
+        file_size = pdf_path.stat().st_size
+        if file_size == 0:
+            raise ValueError(f"PDF 파일이 비어있습니다: {pdf_path}")
+
+        st.info(f"📄 처리 중: {pdf_path.name} ({file_size:,} bytes)")
+
         # extract_pdf_to_json은 output_dir를 받아서 자동으로 파일명 생성
         # output_dir에 pdf_path.stem + ".json" 형태로 저장됨
-        extract_pdf_to_json(str(pdf_path), str(OUTPUT_DIR))
+        try:
+            extract_pdf_to_json(str(pdf_path), str(SERVER_OUTPUT_DIR))
+        except Exception as extract_error:
+            raise Exception(f"PDF 추출 실패: {extract_error}")
 
         # 생성된 JSON 파일 경로
-        json_path = OUTPUT_DIR / f"{pdf_path.stem}.json"
+        json_path = SERVER_OUTPUT_DIR / f"{pdf_path.stem}.json"
 
         # JSON 파일이 정상 생성되었는지 확인
         if not json_path.exists():
             raise FileNotFoundError(f"JSON 파일이 생성되지 않았습니다: {json_path}")
 
-        return {'file': pdf_path.name, 'status': 'success', 'json_path': str(json_path)}
+        # JSON 파일 크기 확인
+        json_size = json_path.stat().st_size
+        if json_size == 0:
+            raise ValueError(f"JSON 파일이 비어있습니다: {json_path}")
+
+        # JSON 내용 검증
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                json_data = json.load(f)
+
+            pages_count = len(json_data.get('pages', []))
+            st.success(f"✅ {pdf_path.name}: JSON 생성 완료 ({pages_count}페이지, {json_size:,} bytes)")
+
+        except json.JSONDecodeError as e:
+            raise ValueError(f"JSON 파싱 실패: {e}")
+
+        return {'file': pdf_path.name, 'status': 'success', 'json_path': str(json_path), 'pages': pages_count}
 
     except Exception as e:
+        st.error(f"❌ {pdf_path.name}: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
         return {'file': pdf_path.name, 'status': 'failed', 'error': str(e)}
 
 
 def normalize_all_jsons(progress_callback=None):
-    """모든 JSON 정규화"""
+    """모든 JSON 정규화 (서버에서 실행)"""
     # OUTPUT_DIR에서 JSON 파일 찾기
-    json_files = list(OUTPUT_DIR.glob("*.json"))
+    json_files = list(SERVER_OUTPUT_DIR.glob("*.json"))
+
+    # ✅ batch_로 시작하는 파일만 제외 (나머지는 모두 처리)
+    json_files = [f for f in json_files if not f.name.startswith('batch_')]
 
     if not json_files:
-        st.error(f"❌ {OUTPUT_DIR}에 JSON 파일이 없습니다.")
+        st.error(f"❌ {SERVER_OUTPUT_DIR}에 JSON 파일이 없습니다.")
         return None
 
     if progress_callback:
         progress_callback(f"📋 {len(json_files)}개 JSON 파일 발견")
 
-    # NORMALIZED_OUTPUT_GOVERNMENT_DIR 생성 확인
-    NORMALIZED_OUTPUT_GOVERNMENT_DIR.mkdir(exist_ok=True)
+    # 발견된 파일 목록 로깅
+    st.info(f"처리할 파일: {', '.join([f.name for f in json_files])}")
 
-    # 모든 JSON을 하나의 normalizer로 처리
-    normalizer = GovernmentStandardNormalizer(
-        json_path="batch",
-        output_dir=str(NORMALIZED_OUTPUT_GOVERNMENT_DIR)
-    )
+    # NORMALIZED_OUTPUT_GOVERNMENT_DIR 생성 확인
+    SERVER_NORMALIZED_DIR.mkdir(exist_ok=True)
+
+    # ✅ 각 JSON 파일마다 개별 normalizer 생성 (연도가 섞이지 않도록)
+    all_master = []
+    all_details = []
+    all_budgets = []
+    all_schedules = []
+    all_performances = []
+    all_weights = []
 
     success_count = 0
+    error_details = []
 
     for i, json_file in enumerate(json_files):
         if progress_callback:
             progress_callback(f"📋 정규화 중: {json_file.name} ({i+1}/{len(json_files)})")
 
         try:
+            # ✅ 각 파일마다 새로운 normalizer 생성
+            normalizer = GovernmentStandardNormalizer(
+                json_path=str(json_file),  # ← 파일명에서 연도 추출됨!
+                output_dir=str(SERVER_NORMALIZED_DIR)
+            )
+
             with open(json_file, 'r', encoding='utf-8') as f:
                 json_data = json.load(f)
 
-            # JSON 데이터가 비어있지 않은지 확인
-            if not json_data or 'pages' not in json_data:
-                st.warning(f"⚠️ {json_file.name}: JSON 구조 오류 (pages 키 없음)")
+            # JSON 데이터 구조 확인
+            if not json_data:
+                error_msg = f"{json_file.name}: JSON이 비어있음"
+                st.warning(f"⚠️ {error_msg}")
+                error_details.append(error_msg)
                 continue
 
-            normalizer.normalize(json_data)
-            success_count += 1
+            if 'pages' not in json_data:
+                error_msg = f"{json_file.name}: 'pages' 키가 없음 (키: {list(json_data.keys())})"
+                st.warning(f"⚠️ {error_msg}")
+                error_details.append(error_msg)
+                continue
+
+            pages_count = len(json_data.get('pages', []))
+            if pages_count == 0:
+                error_msg = f"{json_file.name}: pages가 비어있음"
+                st.warning(f"⚠️ {error_msg}")
+                error_details.append(error_msg)
+                continue
+
+            # 정규화 실행
+            result = normalizer.normalize(json_data)
+
+            if result:
+                # ✅ 데이터 누적
+                all_master.extend(normalizer.data['master'])
+                all_details.extend(normalizer.data['details'])
+                all_budgets.extend(normalizer.data['budgets'])
+                all_schedules.extend(normalizer.data['schedules'])
+                all_performances.extend(normalizer.data['performances'])
+                all_weights.extend(normalizer.data['weights'])
+
+                success_count += 1
+                st.success(f"✅ {json_file.name}: 정규화 성공 ({pages_count}페이지, {len(normalizer.data['master'])}개 내역사업)")
+            else:
+                error_msg = f"{json_file.name}: 정규화 실패 (normalize 반환값 False)"
+                st.error(f"❌ {error_msg}")
+                error_details.append(error_msg)
 
         except json.JSONDecodeError as e:
-            st.error(f"❌ {json_file.name}: JSON 파싱 실패 - {e}")
+            error_msg = f"{json_file.name}: JSON 파싱 실패 - {e}"
+            st.error(f"❌ {error_msg}")
+            error_details.append(error_msg)
         except Exception as e:
-            st.error(f"❌ {json_file.name}: 정규화 실패 - {e}")
+            error_msg = f"{json_file.name}: 정규화 중 에러 - {e}"
+            st.error(f"❌ {error_msg}")
+            error_details.append(error_msg)
+            import traceback
+            st.code(traceback.format_exc())
 
     if success_count == 0:
         st.error("❌ 정규화에 성공한 파일이 없습니다.")
+        if error_details:
+            with st.expander("🔍 에러 상세"):
+                for error in error_details:
+                    st.text(f"- {error}")
         return None
 
-    # CSV 저장
+    # 경고: 일부만 성공한 경우
+    if error_details:
+        st.warning(f"⚠️ {success_count}/{len(json_files)}개 파일만 정규화 성공")
+        with st.expander("🔍 실패한 파일"):
+            for error in error_details:
+                st.text(f"- {error}")
+
+    # ✅ 누적된 데이터를 CSV로 저장
     try:
-        normalizer.save_to_csv()
+        import pandas as pd
+
+        # TB_PLAN_MASTER
+        if all_master:
+            df = pd.DataFrame(all_master)
+            df = df[['PLAN_ID', 'YEAR', 'NUM', 'NATION_ORGAN_NM', 'BIZ_NM', 'DETAIL_BIZ_NM']]
+            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_MASTER.csv", index=False, encoding='utf-8-sig')
+            st.info(f"✅ TB_PLAN_MASTER.csv 저장 ({len(all_master)}건)")
+
+        # TB_PLAN_DETAIL
+        if all_details:
+            df = pd.DataFrame(all_details)
+            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_DETAIL.csv", index=False, encoding='utf-8-sig')
+            st.info(f"✅ TB_PLAN_DETAIL.csv 저장 ({len(all_details)}건)")
+
+        # TB_PLAN_BUDGET
+        if all_budgets:
+            df = pd.DataFrame(all_budgets)
+            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_BUDGET.csv", index=False, encoding='utf-8-sig')
+            st.info(f"✅ TB_PLAN_BUDGET.csv 저장 ({len(all_budgets)}건)")
+
+        # TB_PLAN_SCHEDULE
+        if all_schedules:
+            df = pd.DataFrame(all_schedules)
+            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_SCHEDULE.csv", index=False, encoding='utf-8-sig')
+            st.info(f"✅ TB_PLAN_SCHEDULE.csv 저장 ({len(all_schedules)}건)")
+
+        # TB_PLAN_PERFORMANCE
+        if all_performances:
+            df = pd.DataFrame(all_performances)
+            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_PERFORMANCE.csv", index=False, encoding='utf-8-sig')
+            st.info(f"✅ TB_PLAN_PERFORMANCE.csv 저장 ({len(all_performances)}건)")
+
+        # TB_PLAN_WEIGHT
+        if all_weights:
+            df = pd.DataFrame(all_weights)
+            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_WEIGHT.csv", index=False, encoding='utf-8-sig')
+            st.info(f"✅ TB_PLAN_WEIGHT.csv 저장 ({len(all_weights)}건)")
 
         # 통계
         stats = {
-            'master': len(normalizer.data['master']),
-            'details': len(normalizer.data['details']),
-            'budgets': len(normalizer.data['budgets']),
-            'schedules': len(normalizer.data['schedules']),
-            'performances': len(normalizer.data['performances'])
+            'master': len(all_master),
+            'details': len(all_details),
+            'budgets': len(all_budgets),
+            'schedules': len(all_schedules),
+            'performances': len(all_performances)
         }
 
         if progress_callback:
-            progress_callback(f"✅ 정규화 완료: {success_count}/{len(json_files)}개 파일")
+            progress_callback(f"✅ 정규화 완료: {success_count}/{len(json_files)}개 파일, {stats['master']}개 내역사업")
 
         return stats
 
     except Exception as e:
         st.error(f"❌ CSV 저장 실패: {e}")
+        import traceback
+        st.code(traceback.format_exc())
         return None
 
 
 def load_to_oracle(progress_callback=None):
-    """Oracle DB 적재"""
+    """Oracle DB 적재 (서버에서 실행)"""
     try:
         # CSV 파일 존재 확인
-        csv_files = list(NORMALIZED_OUTPUT_GOVERNMENT_DIR.glob("TB_PLAN_*.csv"))
+        csv_files = list(SERVER_NORMALIZED_DIR.glob("TB_PLAN_*.csv"))
         if not csv_files:
-            raise FileNotFoundError(f"CSV 파일이 없습니다: {NORMALIZED_OUTPUT_GOVERNMENT_DIR}")
+            raise FileNotFoundError(f"CSV 파일이 없습니다: {SERVER_NORMALIZED_DIR}")
 
         if progress_callback:
             progress_callback(f"🔌 Oracle DB 연결 중... ({len(csv_files)}개 CSV 발견)")
 
-        loader = OracleDirectLoader(ORACLE_CONFIG, str(NORMALIZED_OUTPUT_GOVERNMENT_DIR))
+        loader = OracleDirectLoader(ORACLE_CONFIG, str(SERVER_NORMALIZED_DIR))
 
         try:
             loader.connect()
@@ -284,7 +428,7 @@ def main():
         if st.button("🗑️ DB 데이터 초기화", type="secondary", use_container_width=True):
             try:
                 with st.spinner("DB 초기화 중..."):
-                    loader = OracleDirectLoader(ORACLE_CONFIG, str(NORMALIZED_OUTPUT_GOVERNMENT_DIR))
+                    loader = OracleDirectLoader(ORACLE_CONFIG, str(SERVER_NORMALIZED_DIR))
 
                     # 연결
                     loader.connect()
@@ -563,8 +707,8 @@ def main():
         - **TB_PLAN_PERFORMANCE**: 성과 정보 (정량적 + 정성적 ✨)
         """)
 
-        if NORMALIZED_OUTPUT_GOVERNMENT_DIR.exists():
-            display_csv_data(NORMALIZED_OUTPUT_GOVERNMENT_DIR)
+        if SERVER_NORMALIZED_DIR.exists():
+            display_csv_data(SERVER_NORMALIZED_DIR)
         else:
             st.info("ℹ️ CSV 데이터가 없습니다. PDF를 업로드하고 처리하세요.")
 

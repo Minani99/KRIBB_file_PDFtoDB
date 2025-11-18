@@ -68,6 +68,12 @@ class GovernmentStandardNormalizer:
 
             # 원본 데이터 (감사용, DB 적재 안함)
             'raw_data': [],
+
+            # 대표성과 (감사용, DB 적재 안함)
+            'key_achievements': [],
+
+            # 주요 추진계획 (감사용, DB 적재 안함)
+            'plan_details': [],
         }
 
         # 컨텍스트
@@ -880,9 +886,15 @@ class GovernmentStandardNormalizer:
         try:
             logger.info(f"🚀 정부 표준 정규화 시작")
 
-            # 메타데이터에서 문서 연도 추출
+            # ✅ 메타데이터에서 문서 연도 추출 (우선순위 1)
             metadata = json_data.get('metadata', {})
-            self.current_context['document_year'] = metadata.get('document_year', datetime.now().year)
+            if metadata and 'document_year' in metadata:
+                self.current_context['document_year'] = metadata['document_year']
+                logger.info(f"📅 JSON metadata에서 연도 추출: {metadata['document_year']}년")
+            # ✅ JSON 파일명에서 추출한 연도 유지 (우선순위 2)
+            else:
+                logger.info(f"📅 파일명에서 연도 사용: {self.current_context['document_year']}년")
+
             self.current_context['performance_year'] = self.current_context['document_year'] - 1
             self.current_context['plan_year'] = self.current_context['document_year']
 
