@@ -4,13 +4,20 @@
 메모리 효율적인 병렬 처리 지원
 """
 
+import sys
+import io
 import gc
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Callable
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime
-import json
+
+# UTF-8 출력 설정 (Windows cp949 에러 방지)
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # 프로그레스 바
 try:
@@ -64,13 +71,13 @@ class BatchPDFProcessor:
             self.use_multiprocessing = use_multiprocessing if use_multiprocessing is not None else False
 
         # 통계
-        self.stats = {
+        self.stats: Dict[str, Any] = {
             'total_files': 0,
             'processed': 0,
             'failed': 0,
             'skipped': 0,
-            'start_time': None,  # type: Optional[datetime]
-            'end_time': None,  # type: Optional[datetime]
+            'start_time': None,
+            'end_time': None,
             'errors': []
         }
 
@@ -265,34 +272,16 @@ class BatchPDFProcessor:
         return self.get_summary(all_results)
 
     def _save_intermediate_results(self, results: List[Dict], batch_num: int):
-        """중간 결과 저장"""
-        try:
-            output_file = self.output_dir / f"batch_results_{batch_num:04d}.json"
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(results, f, ensure_ascii=False, indent=2, default=str)
-            logger.info(f"중간 결과 저장: {output_file}")
-        except Exception as e:
-            logger.error(f"중간 결과 저장 실패: {e}")
+        """중간 결과 저장 (비활성화 - 개별 JSON만 사용)"""
+        # 각 PDF의 JSON은 extract_pdf_to_json에서 이미 생성됨
+        pass
 
     def _save_final_results(self, results: List[Dict]):
-        """최종 결과 저장"""
-        try:
-            # 전체 결과
-            output_file = self.output_dir / f"batch_results_final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(results, f, ensure_ascii=False, indent=2, default=str)
-
-            # 요약 리포트
-            summary = self.get_summary(results)
-            report_file = self.output_dir / f"batch_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            with open(report_file, 'w', encoding='utf-8') as f:
-                json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
-
-            logger.info(f"최종 결과 저장: {output_file}")
-            logger.info(f"요약 리포트: {report_file}")
-
-        except Exception as e:
-            logger.error(f"최종 결과 저장 실패: {e}")
+        """최종 결과 저장 (개별 PDF JSON만 유지)"""
+        # 각 PDF에 대한 개별 JSON 파일은 extract_pdf_to_json에서 이미 생성됨
+        # 추가 리포트 파일은 생성하지 않음
+        logger.info(f"✅ 총 {len(results)}개 파일 처리 완료 (각 PDF별 JSON 파일 생성됨)")
+        pass
 
     def get_summary(self, results: List[Dict] = None) -> Dict[str, Any]:
         """처리 요약 정보"""

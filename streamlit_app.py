@@ -9,7 +9,6 @@ import pandas as pd
 from pathlib import Path
 import json
 import time
-from datetime import datetime
 import sys
 import os
 
@@ -19,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from extract_pdf_to_json import extract_pdf_to_json
 from normalize_government_standard import GovernmentStandardNormalizer
 from load_oracle_direct import OracleDirectLoader
-from config import ORACLE_CONFIG, INPUT_DIR, OUTPUT_DIR, NORMALIZED_OUTPUT_GOVERNMENT_DIR
+from config import ORACLE_CONFIG, INPUT_DIR, OUTPUT_DIR, NORMALIZED_OUTPUT_GOVERNMENT_DIR, ORACLE_CONFIG_DEV
 
 # 페이지 설정
 st.set_page_config(
@@ -121,11 +120,9 @@ def process_single_pdf(pdf_path, progress_callback=None):
 
 
 def normalize_all_jsons(progress_callback=None):
-    """모든 JSON 정규화 (서버에서 실행)"""
+    """모든 JSON 정규화 (서버에서 실행) - main.py 방식으로 수정"""
     # OUTPUT_DIR에서 JSON 파일 찾기
     json_files = list(SERVER_OUTPUT_DIR.glob("*.json"))
-
-    # ✅ batch_로 시작하는 파일만 제외 (나머지는 모두 처리)
     json_files = [f for f in json_files if not f.name.startswith('batch_')]
 
     if not json_files:
@@ -135,159 +132,109 @@ def normalize_all_jsons(progress_callback=None):
     if progress_callback:
         progress_callback(f"📋 {len(json_files)}개 JSON 파일 발견")
 
-    # 발견된 파일 목록 로깅
     st.info(f"처리할 파일: {', '.join([f.name for f in json_files])}")
-
-    # NORMALIZED_OUTPUT_GOVERNMENT_DIR 생성 확인
     SERVER_NORMALIZED_DIR.mkdir(exist_ok=True)
 
-    # ✅ 각 JSON 파일마다 개별 normalizer 생성 (연도가 섞이지 않도록)
-    all_master = []
-    all_details = []
-    all_budgets = []
-    all_schedules = []
-    all_performances = []
-    all_weights = []
+    try:
+        # 1. 모든 JSON 로드
+        all_json_data = []
+        for i, json_file in enumerate(json_files, 1):
+            if progress_callback:
+                progress_callback(f"📂 JSON 로드 중: {json_file.name} ({i}/{len(json_files)})")
 
-    success_count = 0
-    error_details = []
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    json_data = json.load(f)
+                    all_json_data.append(json_data)
+            except Exception as e:
+                st.error(f"❌ JSON 로드 실패 {json_file.name}: {e}")
 
-    for i, json_file in enumerate(json_files):
-        if progress_callback:
-            progress_callback(f"📋 정규화 중: {json_file.name} ({i+1}/{len(json_files)})")
+        st.info(f"✅ {len(all_json_data)}개 JSON 로드 완료")
+
+        if not all_json_data:
+            st.error("❌ 로드된 JSON이 없습니다.")
+            return None
+
+        # 2. Oracle DB 연결 (PLAN_ID 매칭용)
+        from oracle_db_manager import OracleDBManager
+        db_manager = None
 
         try:
-            # ✅ 각 파일마다 새로운 normalizer 생성
-            normalizer = GovernmentStandardNormalizer(
-                json_path=str(json_file),  # ← 파일명에서 연도 추출됨!
-                output_dir=str(SERVER_NORMALIZED_DIR)
-            )
-
-            with open(json_file, 'r', encoding='utf-8') as f:
-                json_data = json.load(f)
-
-            # JSON 데이터 구조 확인
-            if not json_data:
-                error_msg = f"{json_file.name}: JSON이 비어있음"
-                st.warning(f"⚠️ {error_msg}")
-                error_details.append(error_msg)
-                continue
-
-            if 'pages' not in json_data:
-                error_msg = f"{json_file.name}: 'pages' 키가 없음 (키: {list(json_data.keys())})"
-                st.warning(f"⚠️ {error_msg}")
-                error_details.append(error_msg)
-                continue
-
-            pages_count = len(json_data.get('pages', []))
-            if pages_count == 0:
-                error_msg = f"{json_file.name}: pages가 비어있음"
-                st.warning(f"⚠️ {error_msg}")
-                error_details.append(error_msg)
-                continue
-
-            # 정규화 실행
-            result = normalizer.normalize(json_data)
-
-            if result:
-                # ✅ 데이터 누적
-                all_master.extend(normalizer.data['master'])
-                all_details.extend(normalizer.data['details'])
-                all_budgets.extend(normalizer.data['budgets'])
-                all_schedules.extend(normalizer.data['schedules'])
-                all_performances.extend(normalizer.data['performances'])
-                all_weights.extend(normalizer.data['weights'])
-
-                success_count += 1
-                st.success(f"✅ {json_file.name}: 정규화 성공 ({pages_count}페이지, {len(normalizer.data['master'])}개 내역사업)")
-            else:
-                error_msg = f"{json_file.name}: 정규화 실패 (normalize 반환값 False)"
-                st.error(f"❌ {error_msg}")
-                error_details.append(error_msg)
-
-        except json.JSONDecodeError as e:
-            error_msg = f"{json_file.name}: JSON 파싱 실패 - {e}"
-            st.error(f"❌ {error_msg}")
-            error_details.append(error_msg)
+            db_manager = OracleDBManager(ORACLE_CONFIG)
+            db_manager.connect()
+            st.success("🔗 DB 연결 성공 (PLAN_ID 매칭용)")
         except Exception as e:
-            error_msg = f"{json_file.name}: 정규화 중 에러 - {e}"
-            st.error(f"❌ {error_msg}")
-            error_details.append(error_msg)
-            import traceback
-            st.code(traceback.format_exc())
+            st.warning(f"⚠️ DB 연결 실패 (신규 PLAN_ID로 생성): {e}")
+            db_manager = None
 
-    if success_count == 0:
-        st.error("❌ 정규화에 성공한 파일이 없습니다.")
-        if error_details:
-            with st.expander("🔍 에러 상세"):
-                for error in error_details:
-                    st.text(f"- {error}")
-        return None
+        # 3. 첫 번째 파일로 normalizer 초기화 (DB 연결 전달)
+        if progress_callback:
+            progress_callback("📋 데이터 정규화 시작...")
 
-    # 경고: 일부만 성공한 경우
-    if error_details:
-        st.warning(f"⚠️ {success_count}/{len(json_files)}개 파일만 정규화 성공")
-        with st.expander("🔍 실패한 파일"):
-            for error in error_details:
-                st.text(f"- {error}")
+        normalizer = GovernmentStandardNormalizer(
+            str(json_files[0]),
+            str(SERVER_NORMALIZED_DIR),
+            db_manager=db_manager  # ✅ DB 연결 전달
+        )
 
-    # ✅ 누적된 데이터를 CSV로 저장
-    try:
-        import pandas as pd
+        # 4. 각 JSON 파일별로 처리 (파일명에서 연도 추출 후 누적)
+        for json_file, json_data in zip(json_files, all_json_data):
+            if progress_callback:
+                progress_callback(f"📋 정규화 중: {json_file.name}")
 
-        # TB_PLAN_MASTER
-        if all_master:
-            df = pd.DataFrame(all_master)
-            df = df[['PLAN_ID', 'YEAR', 'NUM', 'NATION_ORGAN_NM', 'BIZ_NM', 'DETAIL_BIZ_NM']]
-            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_MASTER.csv", index=False, encoding='utf-8-sig')
-            st.info(f"✅ TB_PLAN_MASTER.csv 저장 ({len(all_master)}건)")
+            # 파일명에서 연도 추출
+            import re
+            filename = json_file.stem
+            year_match = re.search(r'(20\d{2})', filename)
 
-        # TB_PLAN_DETAIL
-        if all_details:
-            df = pd.DataFrame(all_details)
-            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_DETAIL.csv", index=False, encoding='utf-8-sig')
-            st.info(f"✅ TB_PLAN_DETAIL.csv 저장 ({len(all_details)}건)")
+            if year_match:
+                doc_year = int(year_match.group(1))
+                st.info(f"📅 {filename} -> {doc_year}년도 데이터 처리 중...")
 
-        # TB_PLAN_BUDGET
-        if all_budgets:
-            df = pd.DataFrame(all_budgets)
-            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_BUDGET.csv", index=False, encoding='utf-8-sig')
-            st.info(f"✅ TB_PLAN_BUDGET.csv 저장 ({len(all_budgets)}건)")
+                # ✅ 연도별로 컨텍스트 업데이트 (main.py와 동일)
+                normalizer.current_context['document_year'] = doc_year
+                normalizer.current_context['performance_year'] = doc_year - 1
+                normalizer.current_context['plan_year'] = doc_year
 
-        # TB_PLAN_SCHEDULE
-        if all_schedules:
-            df = pd.DataFrame(all_schedules)
-            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_SCHEDULE.csv", index=False, encoding='utf-8-sig')
-            st.info(f"✅ TB_PLAN_SCHEDULE.csv 저장 ({len(all_schedules)}건)")
+            # 정규화 실행 (데이터 누적)
+            normalizer.normalize(json_data)
 
-        # TB_PLAN_PERFORMANCE
-        if all_performances:
-            df = pd.DataFrame(all_performances)
-            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_PERFORMANCE.csv", index=False, encoding='utf-8-sig')
-            st.info(f"✅ TB_PLAN_PERFORMANCE.csv 저장 ({len(all_performances)}건)")
+        # 5. 한 번에 CSV 저장 (main.py와 동일)
+        if progress_callback:
+            progress_callback("💾 CSV 저장 중...")
 
-        # TB_PLAN_WEIGHT
-        if all_weights:
-            df = pd.DataFrame(all_weights)
-            df.to_csv(SERVER_NORMALIZED_DIR / "TB_PLAN_WEIGHT.csv", index=False, encoding='utf-8-sig')
-            st.info(f"✅ TB_PLAN_WEIGHT.csv 저장 ({len(all_weights)}건)")
+        normalizer.save_to_csv()
 
-        # 통계
+        # DB 연결 종료
+        if db_manager:
+            db_manager.close()
+            st.info("🔌 DB 연결 종료")
+
+        # 6. 통계 출력
         stats = {
-            'master': len(all_master),
-            'details': len(all_details),
-            'budgets': len(all_budgets),
-            'schedules': len(all_schedules),
-            'performances': len(all_performances)
+            'plan_data': len(normalizer.data['plan_data']),
+            'budgets': len(normalizer.data['budgets']),
+            'schedules': len(normalizer.data['schedules']),
+            'performances': len(normalizer.data['performances']),
+            'achievements': len(normalizer.data['achievements'])
         }
 
+        st.success(f"""
+        ✅ 정규화 완료!
+        - 내역사업: {stats['plan_data']}개
+        - 예산: {stats['budgets']}건
+        - 일정: {stats['schedules']}건
+        - 성과: {stats['performances']}건
+        - 대표성과: {stats['achievements']}건
+        """)
+
         if progress_callback:
-            progress_callback(f"✅ 정규화 완료: {success_count}/{len(json_files)}개 파일, {stats['master']}개 내역사업")
+            progress_callback(f"✅ 정규화 완료: {stats['plan_data']}개 내역사업")
 
         return stats
 
     except Exception as e:
-        st.error(f"❌ CSV 저장 실패: {e}")
+        st.error(f"❌ 정규화 실패: {e}")
         import traceback
         st.code(traceback.format_exc())
         return None
@@ -304,7 +251,12 @@ def load_to_oracle(progress_callback=None):
         if progress_callback:
             progress_callback(f"🔌 Oracle DB 연결 중... ({len(csv_files)}개 CSV 발견)")
 
-        loader = OracleDirectLoader(ORACLE_CONFIG, str(SERVER_NORMALIZED_DIR))
+        # 2개 DB 연결: 읽기(BICS) + 쓰기(BICS_DEV)
+        loader = OracleDirectLoader(
+            db_config_read=ORACLE_CONFIG,
+            db_config_write=ORACLE_CONFIG_DEV,
+            csv_dir=str(SERVER_NORMALIZED_DIR)
+        )
 
         try:
             loader.connect()
@@ -312,30 +264,30 @@ def load_to_oracle(progress_callback=None):
             raise Exception(f"Oracle 연결 실패: {e}")
 
         if progress_callback:
-            progress_callback("🏗️ 테이블 생성 중...")
+            progress_callback("🔍 기존 TB_PLAN_DATA와 매칭 중...")
 
         try:
-            loader.create_tables()
+            # ✅ 매칭 기반 적재 실행
+            # - BICS의 TB_PLAN_DATA를 BICS_DEV로 복사 (FK용)
+            # - 기존 BICS.TB_PLAN_DATA 조회 (매칭용)
+            # - CSV와 매칭 (YEAR, BIZ_NM, DETAIL_BIZ_NM 기준)
+            # - 매칭 리포트 생성
+            # - 하위 4개 테이블 BICS_DEV에 적재
+            loader.load_with_matching()
         except Exception as e:
-            loader.db_manager.close()
-            raise Exception(f"테이블 생성 실패: {e}")
-
-        if progress_callback:
-            progress_callback("📊 데이터 적재 중...")
-
-        try:
-            loader.load_all_tables()
-        except Exception as e:
-            loader.db_manager.close()
+            loader.close()
             raise Exception(f"데이터 적재 실패: {e}")
 
-        loader.db_manager.close()
+        loader.close()
 
-        # 적재된 레코드 수 확인
+        # 적재 통계
         total_records = loader.load_stats.get('total_records', 0)
+        matched = loader.load_stats.get('matched', 0)
+        unmatched = loader.load_stats.get('unmatched', 0)
+        diff_found = loader.load_stats.get('diff_found', 0)
 
-        if total_records == 0:
-            raise Exception("적재된 레코드가 0건입니다. 에러 로그를 확인하세요.")
+        if total_records == 0 and matched == 0:
+            raise Exception(f"적재된 레코드가 0건입니다.\n매칭 성공: {matched}건, 실패: {unmatched}건\n차이점 발견: {diff_found}건")
 
         return loader.load_stats
 
@@ -344,11 +296,13 @@ def load_to_oracle(progress_callback=None):
 
         # ORA 에러 코드 해석
         if "ORA-00001" in error_msg:
-            raise Exception(f"중복 키 에러 (ORA-00001): 이미 같은 데이터가 DB에 존재합니다.\n해���: Streamlit을 재시작하거나 DB 데이터를 삭제하세요.")
+            raise Exception(f"중복 키 에러 (ORA-00001): 이미 같은 데이터가 하위 테이블에 존재합니다.\n해결: 사이드바에서 'DB 데이터 초기화' 버튼을 누르세요.")
+        elif "ORA-02291" in error_msg:
+            raise Exception(f"FK 제약 조건 위반 (ORA-02291): 부모 키(PLAN_ID)를 찾을 수 없습니다.\n기존 TB_PLAN_DATA에 해당 내역사업이 없을 수 있습니다.\n매칭 리포트를 확인하세요: {SERVER_NORMALIZED_DIR}/matching_reports/")
         elif "ORA-12541" in error_msg:
             raise Exception(f"Oracle 서버 연결 실패 (ORA-12541): 서버가 실행 중인지 확인하세요.")
         elif "ORA-01017" in error_msg:
-            raise Exception(f"인증 실패 (ORA-01017): 사용자명/비밀번호를 확인하세요.")
+            raise Exception(f"인증 실패 (ORA-01017): 사용자명/비밀번호를 확인하세요. (현재: {ORACLE_CONFIG['user']})")
         else:
             raise Exception(f"Oracle DB 적재 실패: {error_msg}")
 
@@ -418,35 +372,56 @@ def main():
         st.markdown("---")
 
         st.subheader("📊 Oracle DB 정보")
-        st.text(f"Host: {ORACLE_CONFIG['host']}")
-        st.text(f"SID: {ORACLE_CONFIG['sid']}")
-        st.text(f"User: {ORACLE_CONFIG['user']}")
+        st.text("🔍 읽기용 (BICS):")
+        st.text(f"  Host: {ORACLE_CONFIG['host']}")
+        st.text(f"  User: {ORACLE_CONFIG['user']}")
+        st.text("")
+        st.text("✍️ 쓰기용 (BICS_DEV):")
+        st.text(f"  Host: {ORACLE_CONFIG_DEV['host']}")
+        st.text(f"  User: {ORACLE_CONFIG_DEV['user']}")
 
         # DB 초기화 버튼
         st.markdown("---")
 
-        if st.button("🗑️ DB 데이터 초기화", type="secondary", use_container_width=True):
+        if st.button("🗑️ BICS_DEV 하위테이블 초기화", type="secondary", use_container_width=True):
             try:
-                with st.spinner("DB 초기화 중..."):
-                    loader = OracleDirectLoader(ORACLE_CONFIG, str(SERVER_NORMALIZED_DIR))
+                with st.spinner("BICS_DEV 하위 테이블 초기화 중..."):
+                    loader = OracleDirectLoader(
+                        db_config_read=ORACLE_CONFIG,
+                        db_config_write=ORACLE_CONFIG_DEV,
+                        csv_dir=str(SERVER_NORMALIZED_DIR)
+                    )
 
                     # 연결
                     loader.connect()
 
-                    # 테이블 삭제
-                    truncated_count = loader.truncate_tables()
+                    # BICS_DEV의 하위 테이블만 삭제
+                    cursor = loader.db_manager_write.connection.cursor()
+                    deleted_tables = []
 
-                    # 명시적 커밋
-                    loader.db_manager.connection.commit()
+                    for table in ['TB_PLAN_ACHIEVEMENTS', 'TB_PLAN_PERFORMANCE', 'TB_PLAN_SCHEDULE', 'TB_PLAN_BUDGET']:
+                        try:
+                            cursor.execute(f"DELETE FROM {table}")
+                            deleted_count = cursor.rowcount
+                            loader.db_manager_write.connection.commit()
+                            deleted_tables.append(f"{table}: {deleted_count}건")
+                            st.info(f"✅ {table} 삭제: {deleted_count}건")
+                        except Exception as e:
+                            st.warning(f"⚠️ {table} 삭제 실패: {e}")
+
+                    cursor.close()
 
                     # 연결 종료
-                    loader.db_manager.close()
+                    loader.close()
 
-                if truncated_count > 0:
-                    st.success(f"✅ DB 데이터 삭제 완료! ({truncated_count}개 테이블)")
-                    st.info("ℹ️ 이제 PDF를 다시 처리하면 중복 에러 없이 적재됩니다.")
+                if deleted_tables:
+                    st.success(f"✅ BICS_DEV 하위 테이블 초기화 완료!")
+                    with st.expander("📋 삭제 내역"):
+                        for item in deleted_tables:
+                            st.text(f"• {item}")
+                    st.info("ℹ️ TB_PLAN_DATA는 유지되었습니다. 이제 PDF를 다시 처리하면 중복 없이 적재됩니다.")
                 else:
-                    st.warning("⚠️ 삭제된 테이블이 없습니다. 테이블이 존재하지 않거나 이미 비어있습니다.")
+                    st.warning("⚠️ 삭제된 테이블이 없습니다.")
 
             except Exception as e:
                 st.error(f"❌ DB 초기화 실패: {e}")
@@ -457,25 +432,15 @@ def main():
                 # 해결 방법 안내
                 st.markdown("""
                 **💡 수동 해결 방법 (Oracle SQL Developer):**
-                ```sql
-                -- 역순으로 실행하세요 (FK 제약조건 때문)
-                TRUNCATE TABLE TB_PLAN_WEIGHT CASCADE;
-                TRUNCATE TABLE TB_PLAN_PERFORMANCE CASCADE;
-                TRUNCATE TABLE TB_PLAN_SCHEDULE CASCADE;
-                TRUNCATE TABLE TB_PLAN_BUDGET CASCADE;
-                TRUNCATE TABLE TB_PLAN_DETAIL CASCADE;
-                TRUNCATE TABLE TB_PLAN_MASTER CASCADE;
-                COMMIT;
-                ```
                 
-                또는 DELETE 사용:
+                ⚠️ TB_PLAN_DATA는 삭제하지 마세요! (BICS에서 복사된 원본 유지)
+                
                 ```sql
-                DELETE FROM TB_PLAN_WEIGHT;
-                DELETE FROM TB_PLAN_PERFORMANCE;
-                DELETE FROM TB_PLAN_SCHEDULE;
-                DELETE FROM TB_PLAN_BUDGET;
-                DELETE FROM TB_PLAN_DETAIL;
-                DELETE FROM TB_PLAN_MASTER;
+                -- BICS_DEV 스키마의 하위 테이블만 삭제
+                DELETE FROM BICS_DEV.TB_PLAN_ACHIEVEMENTS;
+                DELETE FROM BICS_DEV.TB_PLAN_PERFORMANCE;
+                DELETE FROM BICS_DEV.TB_PLAN_SCHEDULE;
+                DELETE FROM BICS_DEV.TB_PLAN_BUDGET;
                 COMMIT;
                 ```
                 """)
@@ -490,8 +455,12 @@ def main():
         4. CSV → Oracle DB 적재
         
         **최신 개선사항:** ✨
-        - 정성적 성과 자동 추출
-        - 세부일정의 실제 날짜 파싱
+        - 2개 DB 연결 (BICS 읽기 + BICS_DEV 쓰기)
+        - PLAN_ID 자동 매칭 (100%)
+        - TB_PLAN_DATA 자동 복사 (BICS → BICS_DEV)
+        - 하위 4개 테이블 완전 적재
+        - 특수문자 처리
+        - FK 제약조건 자동 처리
         """)
 
     # 메인 탭
@@ -600,12 +569,11 @@ def main():
                                     1. **중복 데이터 에러 (ORA-00001):**
                                        - 아래 SQL을 실행하여 기존 데이터 삭제:
                                        ```sql
+                                       TRUNCATE TABLE TB_PLAN_ACHIEVEMENTS;
                                        TRUNCATE TABLE TB_PLAN_PERFORMANCE;
                                        TRUNCATE TABLE TB_PLAN_SCHEDULE;
                                        TRUNCATE TABLE TB_PLAN_BUDGET;
-                                       TRUNCATE TABLE TB_PLAN_DETAIL;
-                                       TRUNCATE TABLE TB_PLAN_MASTER;
-                                       TRUNCATE TABLE TB_PLAN_WEIGHT;
+                                       TRUNCATE TABLE TB_PLAN_DATA;
                                        ```
                                        - 또는 Streamlit 앱을 재시작하세요.
                                     
@@ -629,15 +597,35 @@ def main():
                         st.balloons()
 
                         # 결과 요약
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("📄 처리 성공", f"{success_count}/{len(results)}")
-                        with col2:
-                            if norm_stats:
-                                st.metric("📊 내역사업", f"{norm_stats['master']}개")
-                        with col3:
-                            if enable_db_load and db_stats:
+                        if enable_db_load and db_stats:
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("📄 처리 성공", f"{success_count}/{len(results)}")
+                            with col2:
+                                if norm_stats:
+                                    st.metric("📊 내역사업", f"{norm_stats['plan_data']}개")
+                            with col3:
+                                st.metric("✅ 매칭 성공", f"{db_stats.get('matched', 0)}건")
+                            with col4:
                                 st.metric("🗄️ DB 적재", f"{db_stats['total_records']:,}건")
+
+                            # 매칭 실패 경고
+                            if db_stats.get('unmatched', 0) > 0:
+                                st.warning(f"⚠️ 매칭 실패: {db_stats['unmatched']}건 - 리포트를 확인하세요!")
+                                st.info(f"📄 리포트 위치: `{SERVER_NORMALIZED_DIR}/matching_reports/`")
+
+                            # 차이점 발견 안내
+                            if db_stats.get('diff_found', 0) > 0:
+                                st.info(f"ℹ️ {db_stats['diff_found']}건의 레코드에서 기존 데이터와 차이점이 발견되었습니다. (diff_report.csv 확인)")
+                        else:
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("📄 처리 성공", f"{success_count}/{len(results)}")
+                            with col2:
+                                if norm_stats:
+                                    st.metric("📊 내역사업", f"{norm_stats['plan_data']}개")
+                            with col3:
+                                st.metric("📋 CSV 생성", "완료")
 
                     except Exception as e:
                         st.error(f"❌ 처리 실패: {e}")
@@ -681,17 +669,17 @@ def main():
 
                 col1, col2, col3, col4, col5 = st.columns(5)
                 with col1:
-                    st.metric("마스터", stats['master'])
+                    st.metric("메인 데이터", stats['plan_data'])
                 with col2:
-                    st.metric("상세", stats['details'])
-                with col3:
                     st.metric("예산", stats['budgets'])
-                with col4:
+                with col3:
                     st.metric("일정", stats['schedules'])
-                with col5:
+                with col4:
                     st.metric("성과", stats['performances'])
+                with col5:
+                    st.metric("대표성과", stats['achievements'])
 
-                st.info("ℹ️ 성과에는 정량적 성과(특허, 논문)와 정성적 성과(추진실적)가 모두 포함됩니다.")
+                st.info("ℹ️ TB_PLAN_DATA(메인) + 4개 하위 테이블로 구성됩니다.")
         else:
             st.info("ℹ️ 아직 처리된 결과가 없습니다.")
 
@@ -700,11 +688,11 @@ def main():
 
         st.markdown("""
         **📋 테이블 구조:**
-        - **TB_PLAN_MASTER**: 내역사업 기본 정보
-        - **TB_PLAN_DETAIL**: 사업 상세 정보
-        - **TB_PLAN_BUDGET**: 연도별 예산 (실적/계획 구분)
-        - **TB_PLAN_SCHEDULE**: 일정 정보 (실제 월 정보 우선 파싱 ✨)
-        - **TB_PLAN_PERFORMANCE**: 성과 정보 (정량적 + 정성적 ✨)
+        - **TB_PLAN_DATA**: 내역사업 메인 정보 (회사 기존 43개 컬럼)
+        - **TB_PLAN_BUDGET**: 연도별 예산 상세 (실적/계획 구분)
+        - **TB_PLAN_SCHEDULE**: 일정 상세 (실제 월 정보 우선 파싱 ✨)
+        - **TB_PLAN_PERFORMANCE**: 성과 상세 (정량적 + 정성적 ✨)
+        - **TB_PLAN_ACHIEVEMENTS**: 대표성과
         """)
 
         if SERVER_NORMALIZED_DIR.exists():
@@ -718,7 +706,121 @@ def main():
         if st.session_state.db_stats:
             stats = st.session_state.db_stats
 
-            st.metric("총 적재 레코드", f"{stats['total_records']:,}건")
+            # 매칭 통계
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("총 적재 레코드", f"{stats['total_records']:,}건")
+            with col2:
+                st.metric("✅ 매칭 성공", f"{stats.get('matched', 0)}건", delta_color="normal")
+            with col3:
+                st.metric("❌ 매칭 실패", f"{stats.get('unmatched', 0)}건", delta_color="inverse")
+            with col4:
+                st.metric("⚠️ 차이점 발견", f"{stats.get('diff_found', 0)}건", delta_color="off")
+
+            # 매칭 실패 레코드 표시
+            if stats.get('unmatched', 0) > 0:
+                st.warning(f"⚠️ {stats['unmatched']}건의 레코드가 기존 TB_PLAN_DATA와 매칭되지 않았습니다.")
+
+                # unmatched_records.csv 읽기
+                unmatched_csv = SERVER_NORMALIZED_DIR / "matching_reports" / "unmatched_records.csv"
+                if unmatched_csv.exists():
+                    with st.expander("📄 매칭 실패 레코드 상세 보기", expanded=True):
+                        try:
+                            unmatched_df = pd.read_csv(unmatched_csv, encoding='utf-8-sig')
+
+                            st.write(f"**총 {len(unmatched_df)}건의 매칭 실패 레코드**")
+
+                            # 필터링 옵션
+                            col_filter1, col_filter2 = st.columns(2)
+                            with col_filter1:
+                                year_filter = st.multiselect(
+                                    "연도 필터",
+                                    options=sorted(unmatched_df['year'].unique()),
+                                    default=sorted(unmatched_df['year'].unique())
+                                )
+                            with col_filter2:
+                                search_text = st.text_input("검색 (BIZ_NM 또는 DETAIL_BIZ_NM)", "")
+
+                            # 필터 적용
+                            filtered_df = unmatched_df[unmatched_df['year'].isin(year_filter)]
+                            if search_text:
+                                filtered_df = filtered_df[
+                                    filtered_df['biz_nm'].str.contains(search_text, case=False, na=False) |
+                                    filtered_df['detail_biz_nm'].str.contains(search_text, case=False, na=False)
+                                ]
+
+                            # 표시할 컬럼 선택
+                            display_cols = ['csv_index', 'year', 'biz_nm', 'detail_biz_nm', 'reason']
+                            if all(col in filtered_df.columns for col in display_cols):
+                                display_df = filtered_df[display_cols]
+                            else:
+                                display_df = filtered_df
+
+                            st.dataframe(
+                                display_df,
+                                use_container_width=True,
+                                height=400
+                            )
+
+                            # 다운로드 버튼
+                            csv_data = unmatched_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+                            st.download_button(
+                                label="📥 매칭 실패 레코드 다운로드 (CSV)",
+                                data=csv_data,
+                                file_name="unmatched_records.csv",
+                                mime='text/csv'
+                            )
+
+                            # 패턴 분석
+                            st.subheader("🔍 매칭 실패 패턴 분석")
+
+                            # BIZ_NM = DETAIL_BIZ_NM인 경우
+                            same_name = unmatched_df[unmatched_df['biz_nm'] == unmatched_df['detail_biz_nm']]
+                            if len(same_name) > 0:
+                                st.info(f"📌 BIZ_NM과 DETAIL_BIZ_NM이 동일한 경우: {len(same_name)}건 (신규 사업일 가능성)")
+
+                            # 연도별 매칭 실패 건수
+                            year_counts = unmatched_df['year'].value_counts().sort_index()
+                            st.write("**연도별 매칭 실패 건수:**")
+                            for year, count in year_counts.items():
+                                st.write(f"- {year}년: {count}건")
+
+                        except Exception as e:
+                            st.error(f"❌ 매칭 실패 레코드 로드 실패: {e}")
+                else:
+                    st.info("📄 매칭 리포트: `normalized_output_government/matching_reports/unmatched_records.csv`")
+
+            # 차이점 발견 레코드 표시
+            if stats.get('diff_found', 0) > 0:
+                st.info(f"ℹ️ {stats['diff_found']}건의 레코드에서 기존 데이터와 차이점이 발견되었습니다.")
+
+                # diff_report.csv 읽기
+                diff_csv = SERVER_NORMALIZED_DIR / "matching_reports" / "diff_report.csv"
+                if diff_csv.exists():
+                    with st.expander("📄 차이점 발견 레코드 상세 보기"):
+                        try:
+                            diff_df = pd.read_csv(diff_csv, encoding='utf-8-sig')
+
+                            st.write(f"**총 {len(diff_df)}건의 차이점 발견**")
+
+                            st.dataframe(
+                                diff_df,
+                                use_container_width=True,
+                                height=300
+                            )
+
+                            # 다운로드 버튼
+                            csv_data = diff_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+                            st.download_button(
+                                label="📥 차이점 리포트 다운로드 (CSV)",
+                                data=csv_data,
+                                file_name="diff_report.csv",
+                                mime='text/csv'
+                            )
+                        except Exception as e:
+                            st.error(f"❌ 차이점 리포트 로드 실패: {e}")
+                else:
+                    st.info("📄 차이점 리포트: `normalized_output_government/matching_reports/diff_report.csv`")
 
             st.subheader("📊 테이블별 통계")
 

@@ -7,13 +7,31 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-*.egg
-
-# Virtual Environment
 .venv/
 venv/
 ENV/
 env/
+
+# Oracle
+*.log
+*.trace
+
+# 데이터 파일
+*.csv
+*.json
+*.pdf
+
+# 입출력 디렉토리 (데이터만 무시, 폴더 구조는 유지)
+output/*.json
+input/*.pdf
+normalized_output_government/*.csv
+!output/.gitkeep
+!input/.gitkeep
+!normalized_output_government/.gitkeep
+
+# 설정 파일 (민감 정보)
+.env
+config_local.py
 
 # IDE
 .idea/
@@ -22,23 +40,21 @@ env/
 *.swo
 *~
 
-# Project specific
-input/*.pdf
-output/*.json
-output/batch_*.json
-normalized_output_government/*.csv
-reports/*.txt
-
 # OS
 .DS_Store
 Thumbs.db
-*.log
+desktop.ini
 
-# Database
-*.db
-*.sqlite
-
-# Temporary files
+# 임시 파일
 *.tmp
 *.bak
+*_backup.*
+check_*.py
+test_*.py
+!test_queries.sql
+
+# 문서 (중복/임시)
+*_SUMMARY.md
+*_COMPLETE.md
+*_guide.md
 

@@ -11,6 +11,7 @@ PDF → JSON → 정규화 → Oracle DB 적재 파이프라인
 """
 
 import sys
+import io
 import json
 from pathlib import Path
 import logging
@@ -18,12 +19,19 @@ from datetime import datetime
 from typing import List
 import argparse
 
+# UTF-8 출력 설정 (Windows cp949 에러 방지)
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 # 핵심 모듈
 from extract_pdf_to_json import extract_pdf_to_json
 from normalize_government_standard import GovernmentStandardNormalizer
 from load_oracle_direct import OracleDirectLoader
 from config import (
     ORACLE_CONFIG,
+    ORACLE_CONFIG_DEV,
     INPUT_DIR,
     OUTPUT_DIR,
     NORMALIZED_OUTPUT_GOVERNMENT_DIR
@@ -52,7 +60,7 @@ class PDFtoDBPipeline:
                  skip_db: bool = False,
                  batch_mode: bool = False,
                  batch_size: int = 10,
-                 max_workers: int = 4
+                 max_workers: int = 5
                  ):
         """
         Args:
@@ -78,7 +86,10 @@ class PDFtoDBPipeline:
             'processed': 0,
             'failed': 0,
             'total_records': 0,
-            'db_loaded': False
+            'db_loaded': False,
+            'matched': 0,
+            'unmatched': 0,
+            'diff_found': 0
         }
     
     def clean_previous_data(self):
@@ -143,17 +154,40 @@ class PDFtoDBPipeline:
             
             logger.info(f"   ✅ JSON 생성: {json_file.name}")
             
-            # 2. JSON → 정규화
+            # 2. JSON → 정규화 (DB 연결 전달하여 PLAN_ID 매칭)
             logger.info("2️⃣ 데이터 정규화")
-            normalizer = GovernmentStandardNormalizer(str(json_file), str(self.normalized_dir))
-            
+
+            # Oracle DB 연결 (PLAN_ID 매칭용)
+            from oracle_db_manager import OracleDBManager
+            db_manager = None
+            if not self.skip_db:
+                try:
+                    db_manager = OracleDBManager(ORACLE_CONFIG)
+                    db_manager.connect()
+                    logger.info("   🔗 DB 연결 (PLAN_ID 매칭용)")
+                except Exception as e:
+                    logger.warning(f"   ⚠️ DB 연결 실패 (신규 PLAN_ID로 생성): {e}")
+                    db_manager = None
+
+            normalizer = GovernmentStandardNormalizer(
+                str(json_file),
+                str(self.normalized_dir),
+                db_manager=db_manager
+            )
+
             if not normalizer.normalize(json_data):
                 logger.error("정규화 실패")
+                if db_manager:
+                    db_manager.close()
                 return False
             
             normalizer.save_to_csv()
             normalizer.print_statistics()
             
+            # DB 연결 종료
+            if db_manager:
+                db_manager.close()
+
             # 통계 업데이트
             for table_name, records in normalizer.data.items():
                 if isinstance(records, list):
@@ -234,10 +268,23 @@ class PDFtoDBPipeline:
             if all_json_data:
                 logger.info("모든 데이터 통합 정규화 시작...")
 
+                # Oracle DB 연결 (PLAN_ID 매칭용)
+                from oracle_db_manager import OracleDBManager
+                db_manager = None
+                if not self.skip_db:
+                    try:
+                        db_manager = OracleDBManager(ORACLE_CONFIG)
+                        db_manager.connect()
+                        logger.info("   🔗 DB 연결 (PLAN_ID 매칭용)")
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ DB 연결 실패 (신규 PLAN_ID로 생성): {e}")
+                        db_manager = None
+
                 # 첫 번째 파일로 normalizer 초기화
                 normalizer = GovernmentStandardNormalizer(
                     str(json_files[0]),
-                    str(self.normalized_dir)
+                    str(self.normalized_dir),
+                    db_manager=db_manager
                 )
 
                 # 각 JSON 파일별로 처리 (연도 추출 포함)
@@ -262,6 +309,11 @@ class PDFtoDBPipeline:
                 normalizer.save_to_csv()
                 normalizer.print_statistics()
 
+                # DB 연결 종료
+                if db_manager:
+                    db_manager.close()
+                    logger.info("   🔌 DB 연결 종료")
+
                 # 통계
                 for table_name, records in normalizer.data.items():
                     if isinstance(records, list):
@@ -279,35 +331,69 @@ class PDFtoDBPipeline:
             return False
     
     def load_to_database(self) -> bool:
-        """3단계: Oracle 데이터베이스 적재"""
+        """3단계: Oracle 데이터베이스 적재 (매칭 기반)"""
         if self.skip_db:
             logger.info("\n⏭️ DB 적재 건너뜀")
             return True
 
         try:
-            logger.info("\n" + "="*60)
+            logger.info("\n" + "="*80)
             logger.info("3️⃣ Oracle 데이터베이스 적재")
-            logger.info("="*60)
+            logger.info("="*80)
 
-            # Oracle 적재
-            oracle_loader = OracleDirectLoader(ORACLE_CONFIG, str(self.normalized_dir))
+            # Oracle 적재 (매칭 기반)
+            # ORACLE_CONFIG: TB_PLAN_DATA 읽기 (매칭용)
+            # ORACLE_CONFIG_DEV: 하위 테이블 쓰기 (적재용)
+            oracle_loader = OracleDirectLoader(
+                db_config_read=ORACLE_CONFIG,
+                db_config_write=ORACLE_CONFIG_DEV,
+                csv_dir=str(self.normalized_dir)
+            )
             oracle_loader.connect()
 
-            # 테이블 생성 (존재하지 않을 경우)
-            oracle_loader.create_tables()
+            logger.info("\n📋 파이프라인 흐름:")
+            logger.info("   1️⃣ BICS.TB_PLAN_DATA 조회 (기존 레코드 - 매칭용)")
+            logger.info("   2️⃣ CSV와 매칭 (YEAR + BIZ_NM + DETAIL_BIZ_NM 기준)")
+            logger.info("   3️⃣ 매칭 성공 → 기존 PLAN_ID 재사용")
+            logger.info("   4️⃣ 매칭 실패 → 신규 레코드로 표시")
+            logger.info("   5️⃣ 하위 테이블 적재 → BICS_DEV 스키마 (TB_PLAN_BUDGET, SCHEDULE, PERFORMANCE, ACHIEVEMENTS)")
 
-            # 데이터 적재
-            oracle_loader.load_all_tables()
+            # 매칭 기반 적재 실행
+            oracle_loader.load_with_matching()
 
-            oracle_loader.db_manager.close()
+            # 통계 출력
+            stats = oracle_loader.load_stats
+
+            logger.info("\n" + "="*80)
+            logger.info("📊 적재 완료 통계")
+            logger.info("="*80)
+            logger.info(f"✅ 총 적재 레코드: {stats['total_records']:,}건")
+            logger.info(f"\n📌 매칭 결과:")
+            logger.info(f"   • 매칭 성공: {stats['matched']}건 (기존 PLAN_ID 재사용)")
+            logger.info(f"   • 매칭 실패: {stats['unmatched']}건 (신규 레코드)")
+            logger.info(f"   • 차이점 발견: {stats['diff_found']}건 (내용 불일치)")
+
+            if stats['unmatched'] > 0:
+                logger.warning(f"\n⚠️  매칭 실패 {stats['unmatched']}건은 신규 내역사업으로 추정됩니다.")
+                logger.warning("   → 매칭 리포트를 확인하여 수동 처리가 필요할 수 있습니다.")
+
+            if stats['diff_found'] > 0:
+                logger.warning(f"\n⚠️  차이점 발견 {stats['diff_found']}건은 내용이 변경된 사업입니다.")
+                logger.warning("   → 업데이트 여부를 검토해주세요.")
+
+            oracle_loader.close()
 
             self.stats['db_loaded'] = True
-            logger.info(f"   ✅ Oracle DB 적재 완료: {oracle_loader.load_stats['total_records']:,}건")
+            self.stats['matched'] = stats['matched']
+            self.stats['unmatched'] = stats['unmatched']
+            self.stats['diff_found'] = stats['diff_found']
 
             return True
 
         except Exception as e:
-            logger.error(f"Oracle DB 적재 실패: {e}")
+            logger.error(f"❌ Oracle DB 적재 실패: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             logger.warning("⚠️ Oracle 적재 실패했지만 계속 진행합니다.")
             return False
 
@@ -364,6 +450,12 @@ class PDFtoDBPipeline:
             logger.info(f"실패: {self.stats['failed']}개")
             logger.info(f"총 레코드: {self.stats['total_records']:,}건")
             logger.info(f"DB 적재: {'✅' if self.stats['db_loaded'] else '⏭️ 건너뜀'}")
+
+            if self.stats['db_loaded']:
+                logger.info(f"\n📌 매칭 결과:")
+                logger.info(f"   • 매칭 성공: {self.stats.get('matched', 0)}건")
+                logger.info(f"   • 매칭 실패: {self.stats.get('unmatched', 0)}건")
+                logger.info(f"   • 차이점 발견: {self.stats.get('diff_found', 0)}건")
 
         except Exception as e:
             logger.error(f"파이프라인 오류: {e}")

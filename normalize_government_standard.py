@@ -1,7 +1,3 @@
-"""
-정부/공공기관 표준 데이터 정규화 시스템 - 완전 개선 버전
-모든 데이터 누락 없이 정규화
-"""
 import json
 import csv
 import re
@@ -19,15 +15,46 @@ logger = logging.getLogger(__name__)
 
 
 class GovernmentStandardNormalizer:
-    """정부 표준 정규화 클래스 - 모든 데이터 포함"""
+    """정부 표준 형식으로 정규화"""
 
-    def __init__(self, json_path: str, output_dir: str):
+    SPECIAL_CHAR_PATTERN = re.compile(r'[(){}\[\]<>「」『』"\'`]|\s{2,}')
+
+    @staticmethod
+    def _clean_text(value: str, max_length: int = None):
+        """텍스트 정리 - 특수문자 제거 (DB 적재용)"""
+        if not value:
+            return ""  # None 대신 빈 문자열 반환
+        # 특수문자 제거: (), {}, [], <>, 「」, 『』, "', `, ‧ (가운뎃점), · (중점), ∙ (bullet operator) 등
+        cleaned = re.sub(r'[(){}\[\]<>「」『』"\'`‧·∙・]', '', value)
+        # 연속된 공백을 하나로
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        if max_length:
+            return cleaned[:max_length]
+        return cleaned
+
+    @staticmethod
+    def _normalize_for_matching(value: str):
+        """매칭용 텍스트 정규화 - 괄호, 공백, 특수문자 모두 제거"""
+        if not value:
+            return ""
+        # 1. 모든 괄호와 내용 제거
+        text = re.sub(r'[\(\)\[\]\{\}<>「」『』]', '', value)
+        # 2. 모든 특수문자 제거 (가운뎃점, 중점, 하이픈, 슬래시 등)
+        text = re.sub(r'[‧·∙・\-_/\\\,\.]', '', text)
+        # 3. 모든 공백 제거
+        text = re.sub(r'\s+', '', text)
+        # 4. 대소문자 통일
+        text = text.upper()
+        return text
+
+    def __init__(self, json_path: str, output_dir: str, db_manager=None):
         self.json_path = Path(json_path)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        self.db_manager = db_manager  # Oracle DB 연결 (PLAN_ID 매칭용)
 
         # 파일명에서 연도 추출 (예: "2024년도 생명공학육성시행계획.json" -> 2024)
-        document_year = 2024  # 기본값
+        document_year = 0000  # 기본값
         filename = self.json_path.stem  # 확장자 제외한 파일명
 
         import re
@@ -48,32 +75,23 @@ class GovernmentStandardNormalizer:
 
         # 데이터 저장소 (Oracle DB 스키마와 동일한 구조)
         self.data = {
-            # 마스터 테이블 (TB_PLAN_MASTER용)
-            'master': [],
+            # 메인 테이블 (TB_PLAN_DATA용 - 회사 기존 스키마)
+            'plan_data': [],
 
-            # 상세 정보 (TB_PLAN_DETAIL용)
-            'details': [],
-
-            # 예산 정보 (TB_PLAN_BUDGET용)
+            # 예산 상세 (TB_PLAN_BUDGET용 - 1:N)
             'budgets': [],
 
-            # 일정 정보 (TB_PLAN_SCHEDULE용)
+            # 일정 상세 (TB_PLAN_SCHEDULE용 - 1:N)
             'schedules': [],
 
-            # 성과 정보 (TB_PLAN_PERFORMANCE용)
+            # 성과 상세 (TB_PLAN_PERFORMANCE용 - 1:N)
             'performances': [],
 
-            # 비중 정보 (TB_PLAN_WEIGHT용)
-            'weights': [],
+            # 대표성과 (TB_PLAN_ACHIEVEMENTS용 - 1:N)
+            'achievements': [],
 
             # 원본 데이터 (감사용, DB 적재 안함)
             'raw_data': [],
-
-            # 대표성과 (감사용, DB 적재 안함)
-            'key_achievements': [],
-
-            # 주요 추진계획 (감사용, DB 적재 안함)
-            'plan_details': [],
         }
 
         # 컨텍스트
@@ -92,6 +110,37 @@ class GovernmentStandardNormalizer:
             'normalized_records': 0,
             'errors': []
         }
+
+        # 기존 PLAN_DATA 캐시 (YEAR, BIZ_NM, DETAIL_BIZ_NM) -> PLAN_ID
+        self.existing_plan_data = {}
+        if db_manager:
+            self._load_existing_plan_data()
+
+    def _load_existing_plan_data(self):
+        """기존 PLAN_DATA를 DB에서 로드 (캐시용)"""
+        logger.info("🔄 기존 PLAN_DATA 로드 중...")
+        try:
+            cursor = self.db_manager.connection.cursor()
+            query = """
+                SELECT PLAN_ID, YEAR, BIZ_NM, DETAIL_BIZ_NM
+                FROM TB_PLAN_DATA
+                WHERE DELETE_YN = 'N'
+            """
+            cursor.execute(query)
+            for plan_id, year, biz_nm, detail_biz_nm in cursor:
+                # ✅ 매칭용 정규화 적용 (괄호, 공백, 특수문자 모두 제거)
+                biz_nm_normalized = self._normalize_for_matching(biz_nm) if biz_nm else ""
+                detail_biz_nm_normalized = self._normalize_for_matching(detail_biz_nm) if detail_biz_nm else ""
+                key = (year, biz_nm_normalized, detail_biz_nm_normalized)
+                self.existing_plan_data[key] = plan_id.strip() if plan_id else None
+                # 디버깅: 처음 5개 출력
+                if len(self.existing_plan_data) <= 5:
+                    logger.info(f"   DB 키: ({year}, '{biz_nm[:30]}...', '{detail_biz_nm[:30]}...') -> {plan_id}")
+
+            cursor.close()
+            logger.info(f"✅ 기존 PLAN_DATA 로드 완료: {len(self.existing_plan_data)}건")
+        except Exception as e:
+            logger.warning(f"⚠️ 기존 PLAN_DATA 로드 실패: {e}")
 
     def _get_next_id(self, entity_type: str) -> int:
         """ID 생성"""
@@ -118,8 +167,14 @@ class GovernmentStandardNormalizer:
         return raw_id
 
     def _extract_key_achievements(self, full_text: str, page_number: int) -> List[Dict]:
-        """대표성과 추출"""
+        """대표성과 추출 - TB_PLAN_ACHIEVEMENTS용"""
         achievements = []
+
+        if not self.current_context.get('sub_project_id'):
+            return []
+
+        # ✅ PLAN_ID를 가져오되, 없으면 빈 문자열
+        plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
 
         # "① 대표성과" 섹션 찾기
         match = re.search(r'①\s*대표성과(.*?)(?:②|③|\(2\)|\(3\)|$)', full_text, re.DOTALL)
@@ -135,14 +190,96 @@ class GovernmentStandardNormalizer:
             achievement = achievement.strip()
             if achievement and len(achievement) > 10:  # 최소 길이 체크
                 achievements.append({
-                    'sub_project_id': self.current_context['sub_project_id'],
-                    'achievement_year': self.current_context['performance_year'],
-                    'achievement_order': idx + 1,
-                    'description': achievement,
-                    'page_number': page_number
+                    'PLAN_ID': plan_id,
+                    'ACHIEVEMENT_YEAR': self.current_context['performance_year'],
+                    'ACHIEVEMENT_ORDER': idx + 1,
+                    'DESCRIPTION': achievement[:4000]  # VARCHAR2(4000) 제한
                 })
 
         return achievements
+
+    def _aggregate_plan_data_fields(self):
+        """
+        하위 테이블(BUDGET, SCHEDULE)에서 계산한 데이터를 TB_PLAN_DATA 집계 필드에 채우기
+        - RESPERIOD, CUR_RESPERIOD (연구기간)
+        - BIZ_SDT, BIZ_EDT (사업 시작일/종료일)
+        - TOTAL_RESPRC, TOTAL_RESPRC_GOV, TOTAL_RESPRC_CIV (총 연구비)
+        - CUR_RESPRC, CUR_RESPRC_GOV, CUR_RESPRC_CIV (당해연도 연구비)
+        - PERFORM_PRC, PLAN_PRC (실적/계획 비용)
+        """
+        logger.info("📊 TB_PLAN_DATA 집계 필드 계산 중...")
+
+        for plan_data in self.data['plan_data']:
+            plan_id = plan_data['PLAN_ID']
+            doc_year = plan_data['YEAR']
+
+            # ============================================================
+            # 1. 예산 데이터로부터 집계 (TB_PLAN_BUDGET)
+            # ============================================================
+            plan_budgets = [b for b in self.data['budgets'] if b['PLAN_ID'] == plan_id]
+
+            if plan_budgets:
+                # 총 연구비 집계 (모든 연도 합산)
+                total_gov = sum(b.get('GOV_AMOUNT') or 0 for b in plan_budgets)
+                total_private = sum(b.get('PRIVATE_AMOUNT') or 0 for b in plan_budgets)
+                total_local = sum(b.get('LOCAL_AMOUNT') or 0 for b in plan_budgets)
+                total_etc = sum(b.get('ETC_AMOUNT') or 0 for b in plan_budgets)
+                total_all = total_gov + total_private + total_local + total_etc
+
+                plan_data['TOTAL_RESPRC'] = f"{total_all:,.0f}" if total_all > 0 else None
+                plan_data['TOTAL_RESPRC_GOV'] = total_gov if total_gov > 0 else None
+                plan_data['TOTAL_RESPRC_CIV'] = total_private if total_private > 0 else None
+
+                # 당해연도 연구비 집계 (문서 연도만)
+                cur_year_budgets = [b for b in plan_budgets if b.get('BUDGET_YEAR') == doc_year]
+                cur_gov = sum(b.get('GOV_AMOUNT') or 0 for b in cur_year_budgets)
+                cur_private = sum(b.get('PRIVATE_AMOUNT') or 0 for b in cur_year_budgets)
+                cur_local = sum(b.get('LOCAL_AMOUNT') or 0 for b in cur_year_budgets)
+                cur_etc = sum(b.get('ETC_AMOUNT') or 0 for b in cur_year_budgets)
+                cur_all = cur_gov + cur_private + cur_local + cur_etc
+
+                plan_data['CUR_RESPRC'] = f"{cur_all:,.0f}" if cur_all > 0 else None
+                plan_data['CUR_RESPRC_GOV'] = cur_gov if cur_gov > 0 else None
+                plan_data['CUR_RESPRC_CIV'] = cur_private if cur_private > 0 else None
+
+                # 실적 비용 (실적 연도 합산)
+                perform_budgets = [b for b in plan_budgets if b.get('CATEGORY') == '실적']
+                perform_total = sum(b.get('TOTAL_AMOUNT') or 0 for b in perform_budgets)
+                plan_data['PERFORM_PRC'] = perform_total if perform_total > 0 else None
+
+                # 계획 비용 (계획 연도 합산)
+                plan_budgets_only = [b for b in plan_budgets if b.get('CATEGORY') == '계획']
+                plan_total = sum(b.get('TOTAL_AMOUNT') or 0 for b in plan_budgets_only)
+                plan_data['PLAN_PRC'] = plan_total if plan_total > 0 else None
+
+                # 연구기간 계산 (예산 테이블의 최소~최대 연도)
+                all_years = [b['BUDGET_YEAR'] for b in plan_budgets if b.get('BUDGET_YEAR')]
+                if all_years:
+                    min_year = min(all_years)
+                    max_year = max(all_years)
+                    plan_data['RESPERIOD'] = f"{min_year}~{max_year}"
+
+                    # 당해연도 연구기간 (문서 연도만)
+                    if doc_year in all_years:
+                        plan_data['CUR_RESPERIOD'] = f"{doc_year}"
+
+            # ============================================================
+            # 2. 일정 데이터로부터 사업 시작일/종료일 (TB_PLAN_SCHEDULE)
+            # ============================================================
+            plan_schedules = [s for s in self.data['schedules'] if s['PLAN_ID'] == plan_id]
+
+            if plan_schedules:
+                # START_DATE가 있는 레코드에서 최소값
+                start_dates = [s.get('START_DATE') for s in plan_schedules if s.get('START_DATE')]
+                if start_dates:
+                    plan_data['BIZ_SDT'] = min(start_dates)
+
+                # END_DATE가 있는 레코드에서 최대값
+                end_dates = [s.get('END_DATE') for s in plan_schedules if s.get('END_DATE')]
+                if end_dates:
+                    plan_data['BIZ_EDT'] = max(end_dates)
+
+        logger.info("✅ TB_PLAN_DATA 집계 완료")
 
     def _extract_plan_details(self, full_text: str, page_number: int) -> List[Dict]:
         """주요 추진계획 내용 추출"""
@@ -204,7 +341,7 @@ class GovernmentStandardNormalizer:
                         # 불릿 포인트나 숫자로 시작하는 항목
                         if re.match(r'^[•\-\d).]\s*', item):
                             normalized.append({
-                                'PLAN_ID': plan_id,
+                                'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
                                 'PERFORMANCE_YEAR': year,
                                 'PERFORMANCE_TYPE': '정성적실적',
                                 'CATEGORY': '추진실적',
@@ -223,6 +360,9 @@ class GovernmentStandardNormalizer:
 
         if not self.current_context.get('sub_project_id'):
             return []
+
+        # ✅ PLAN_ID 가져오기
+        plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
 
         if not period or not task or period in ['구분', '추진일정', '추진사항', '항목', '주요내용']:
             return []
@@ -325,7 +465,7 @@ class GovernmentStandardNormalizer:
                 last_day = calendar.monthrange(parsed_year, end_month)[1]
 
                 record = {
-                    'PLAN_ID': plan_id,
+                    'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
                     'SCHEDULE_YEAR': parsed_year,
                     'QUARTER': f"{start_month}월~{end_month}월",
                     'TASK_NAME': task_category[:768] if task_category else None,
@@ -341,7 +481,7 @@ class GovernmentStandardNormalizer:
                 if quarters:
                     for quarter in quarters:
                         record = {
-                            'PLAN_ID': plan_id,
+                            'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
                             'SCHEDULE_YEAR': year,
                             'QUARTER': f"{quarter}/4분기",
                             'TASK_NAME': task_category[:768] if task_category else None,
@@ -352,7 +492,7 @@ class GovernmentStandardNormalizer:
                         normalized.append(record)
                 else:
                     record = {
-                        'PLAN_ID': plan_id,
+                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
                         'SCHEDULE_YEAR': year,
                         'QUARTER': '연중',
                         'TASK_NAME': task_category[:768] if task_category else None,
@@ -365,12 +505,18 @@ class GovernmentStandardNormalizer:
         return normalized
 
     def _normalize_performance_table(self, rows: List[List], raw_data_id: int) -> List[Dict]:
-        """성과 테이블 정규화 - 모든 성과 지표 포함"""
+        """성과 테이블 정규화 - PLAN_ID만 사용"""
         normalized = []
         year = self.current_context['performance_year']
 
         if not rows or len(rows) < 2:
             return []
+
+        if not self.current_context.get('sub_project_id'):
+            return []
+
+        # ✅ PLAN_ID 가져오기
+        plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
 
         # 테이블 타입 감지
         header_text = ' '.join(str(c) for c in rows[0]).lower()
@@ -378,24 +524,18 @@ class GovernmentStandardNormalizer:
         # 1. 특허/논문 복합 테이블
         if '특허성과' in header_text and '논문성과' in header_text:
             if len(rows) >= 4:
-                data_row = rows[-1]  # 마지막 행이 실제 데이터
+                data_row = rows[-1]
 
-                # 특허 데이터 추출 (0-3번 컬럼)
-                patent_indicators = [
-                    ('국내출원', 0), ('국내등록', 1),
-                    ('국외출원', 2), ('국외등록', 3)
-                ]
-
-                for indicator_type, idx in patent_indicators:
+                # 특허 데이터
+                for indicator_type, idx in [('국내출원', 0), ('국내등록', 1), ('국외출원', 2), ('국외등록', 3)]:
                     if idx < len(data_row):
                         try:
                             val_str = str(data_row[idx]).replace(',', '').strip()
                             if val_str and val_str != '-':
                                 val = float(val_str)
-                                if val > 0 and self.current_context.get('sub_project_id'):
-                                    plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
+                                if val > 0:
                                     normalized.append({
-                                        'PLAN_ID': plan_id,
+                                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
                                         'PERFORMANCE_YEAR': year,
                                         'PERFORMANCE_TYPE': '특허',
                                         'CATEGORY': indicator_type,
@@ -405,22 +545,16 @@ class GovernmentStandardNormalizer:
                                     })
                         except: pass
 
-                # 논문 데이터 추출 (4-7번 컬럼)
-                paper_indicators = [
-                    ('IF20이상', 4), ('IF10이상', 5),
-                    ('SCIE', 6), ('비SCIE', 7)
-                ]
-
-                for indicator_type, idx in paper_indicators:
+                # 논문 데이터
+                for indicator_type, idx in [('IF20이상', 4), ('IF10이상', 5), ('SCIE', 6), ('비SCIE', 7)]:
                     if idx < len(data_row):
                         try:
                             val_str = str(data_row[idx]).replace(',', '').strip()
                             if val_str and val_str != '-':
                                 val = float(val_str)
-                                if val > 0 and self.current_context.get('sub_project_id'):
-                                    plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
+                                if val > 0:
                                     normalized.append({
-                                        'PLAN_ID': plan_id,
+                                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
                                         'PERFORMANCE_YEAR': year,
                                         'PERFORMANCE_TYPE': '논문',
                                         'CATEGORY': indicator_type,
@@ -434,205 +568,73 @@ class GovernmentStandardNormalizer:
         elif '기술이전' in header_text or '기술료' in header_text:
             if len(rows) >= 3:
                 data_row = rows[-1]
+                indicators = [('기술지도', 0, '건'), ('기술이전', 1, '건'), ('기술료', 3, '백만원')]
 
-                # 기술지도 (0번 컬럼)
-                if len(data_row) > 0:
-                    try:
-                        val_str = str(data_row[0]).replace(',', '').strip()
-                        if val_str and val_str != '-':
-                            val = float(val_str)
-                            if val > 0:
-                                normalized.append({
-                                    'id': self._get_next_id('performance'),
-                                    'sub_project_id': self.current_context['sub_project_id'],
-                                    'raw_data_id': raw_data_id,
-                                    'document_year': self.current_context['document_year'],
-                                    'performance_year': year,
-                                    'indicator_category': '기술이전',
-                                    'indicator_type': '기술지도',
-                                    'value': val,
-                                    'unit': '건',
-                                    'original_text': str(rows)
-                                })
-                    except: pass
-
-                # 기술이전 (1번 컬럼)
-                if len(data_row) > 1:
-                    try:
-                        val_str = str(data_row[1]).replace(',', '').strip()
-                        if val_str and val_str != '-':
-                            val = float(val_str)
-                            if val > 0:
-                                normalized.append({
-                                    'id': self._get_next_id('performance'),
-                                    'sub_project_id': self.current_context['sub_project_id'],
-                                    'raw_data_id': raw_data_id,
-                                    'document_year': self.current_context['document_year'],
-                                    'performance_year': year,
-                                    'indicator_category': '기술이전',
-                                    'indicator_type': '기술이전',
-                                    'value': val,
-                                    'unit': '건',
-                                    'original_text': str(rows)
-                                })
-                    except: pass
-
-                # 기술료 금액 (3번 컬럼)
-                if len(data_row) > 3:
-                    try:
-                        val_str = str(data_row[3]).replace(',', '').strip()
-                        if val_str and val_str != '-':
-                            val = float(val_str)
-                            if val > 0:
-                                normalized.append({
-                                    'id': self._get_next_id('performance'),
-                                    'sub_project_id': self.current_context['sub_project_id'],
-                                    'raw_data_id': raw_data_id,
-                                    'document_year': self.current_context['document_year'],
-                                    'performance_year': year,
-                                    'indicator_category': '기술이전',
-                                    'indicator_type': '기술료',
-                                    'value': val,
-                                    'unit': '백만원',
-                                    'original_text': str(rows)
-                                })
-                    except: pass
+                for category, idx, unit in indicators:
+                    if idx < len(data_row):
+                        try:
+                            val_str = str(data_row[idx]).replace(',', '').strip()
+                            if val_str and val_str != '-':
+                                val = float(val_str)
+                                if val > 0:
+                                    normalized.append({
+                                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                                        'PERFORMANCE_YEAR': year,
+                                        'PERFORMANCE_TYPE': '기술이전',
+                                        'CATEGORY': category,
+                                        'VALUE': val,
+                                        'UNIT': unit,
+                                        'ORIGINAL_TEXT': str(rows)[:4000]
+                                    })
+                        except: pass
 
         # 3. 국제협력 테이블
         elif '국제협력' in header_text or '해외연구자' in header_text:
             if len(rows) >= 3:
                 data_row = rows[-1]
+                indicators = [('해외연구자유치', 0, '명'), ('국내연구자파견', 1, '명'), ('국제학술회의개최', 2, '건')]
 
-                # 해외연구자 유치 (0번 컬럼)
-                if len(data_row) > 0:
-                    try:
-                        val_str = str(data_row[0]).replace(',', '').strip()
-                        if val_str and val_str != '-':
-                            val = float(val_str)
-                            if val > 0:
-                                normalized.append({
-                                    'id': self._get_next_id('performance'),
-                                    'sub_project_id': self.current_context['sub_project_id'],
-                                    'raw_data_id': raw_data_id,
-                                    'document_year': self.current_context['document_year'],
-                                    'performance_year': year,
-                                    'indicator_category': '국제협력',
-                                    'indicator_type': '해외연구자유치',
-                                    'value': val,
-                                    'unit': '명',
-                                    'original_text': str(rows)
-                                })
-                    except: pass
-
-                # 국내연구자 파견 (1번 컬럼)
-                if len(data_row) > 1:
-                    try:
-                        val_str = str(data_row[1]).replace(',', '').strip()
-                        if val_str and val_str != '-':
-                            val = float(val_str)
-                            if val > 0:
-                                normalized.append({
-                                    'id': self._get_next_id('performance'),
-                                    'sub_project_id': self.current_context['sub_project_id'],
-                                    'raw_data_id': raw_data_id,
-                                    'document_year': self.current_context['document_year'],
-                                    'performance_year': year,
-                                    'indicator_category': '국제협력',
-                                    'indicator_type': '국내연구자파견',
-                                    'value': val,
-                                    'unit': '명',
-                                    'original_text': str(rows)
-                                })
-                    except: pass
-
-                # 국제학술회의 개최 (2번 컬럼)
-                if len(data_row) > 2:
-                    try:
-                        val_str = str(data_row[2]).replace(',', '').strip()
-                        if val_str and val_str != '-':
-                            val = float(val_str)
-                            if val > 0:
-                                normalized.append({
-                                    'id': self._get_next_id('performance'),
-                                    'sub_project_id': self.current_context['sub_project_id'],
-                                    'raw_data_id': raw_data_id,
-                                    'document_year': self.current_context['document_year'],
-                                    'performance_year': year,
-                                    'indicator_category': '국제협력',
-                                    'indicator_type': '국제학술회의개최',
-                                    'value': val,
-                                    'unit': '건',
-                                    'original_text': str(rows)
-                                })
-                    except: pass
+                for category, idx, unit in indicators:
+                    if idx < len(data_row):
+                        try:
+                            val_str = str(data_row[idx]).replace(',', '').strip()
+                            if val_str and val_str != '-':
+                                val = float(val_str)
+                                if val > 0:
+                                    normalized.append({
+                                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                                        'PERFORMANCE_YEAR': year,
+                                        'PERFORMANCE_TYPE': '국제협력',
+                                        'CATEGORY': category,
+                                        'VALUE': val,
+                                        'UNIT': unit,
+                                        'ORIGINAL_TEXT': str(rows)[:4000]
+                                    })
+                        except: pass
 
         # 4. 인력양성 테이블
         elif '학위배출' in header_text or '박사' in header_text:
             if len(rows) >= 3:
                 data_row = rows[-1]
+                indicators = [('박사배출', 0, '명'), ('석사배출', 1, '명'), ('연구과제참여인력', 4, '명')]
 
-                # 박사 (0번 컬럼)
-                if len(data_row) > 0:
-                    try:
-                        val_str = str(data_row[0]).replace(',', '').strip()
-                        if val_str and val_str != '-':
-                            val = float(val_str)
-                            if val > 0:
-                                normalized.append({
-                                    'id': self._get_next_id('performance'),
-                                    'sub_project_id': self.current_context['sub_project_id'],
-                                    'raw_data_id': raw_data_id,
-                                    'document_year': self.current_context['document_year'],
-                                    'performance_year': year,
-                                    'indicator_category': '인력양성',
-                                    'indicator_type': '박사배출',
-                                    'value': val,
-                                    'unit': '명',
-                                    'original_text': str(rows)
-                                })
-                    except: pass
-
-                # 석사 (1번 컬럼)
-                if len(data_row) > 1:
-                    try:
-                        val_str = str(data_row[1]).replace(',', '').strip()
-                        if val_str and val_str != '-':
-                            val = float(val_str)
-                            if val > 0:
-                                normalized.append({
-                                    'id': self._get_next_id('performance'),
-                                    'sub_project_id': self.current_context['sub_project_id'],
-                                    'raw_data_id': raw_data_id,
-                                    'document_year': self.current_context['document_year'],
-                                    'performance_year': year,
-                                    'indicator_category': '인력양성',
-                                    'indicator_type': '석사배출',
-                                    'value': val,
-                                    'unit': '명',
-                                    'original_text': str(rows)
-                                })
-                    except: pass
-
-                # 연구과제 참여인력 (4번 컬럼)
-                if len(data_row) > 4:
-                    try:
-                        val_str = str(data_row[4]).replace(',', '').strip()
-                        if val_str and val_str != '-':
-                            val = float(val_str)
-                            if val > 0:
-                                normalized.append({
-                                    'id': self._get_next_id('performance'),
-                                    'sub_project_id': self.current_context['sub_project_id'],
-                                    'raw_data_id': raw_data_id,
-                                    'document_year': self.current_context['document_year'],
-                                    'performance_year': year,
-                                    'indicator_category': '인력양성',
-                                    'indicator_type': '연구과제참여인력',
-                                    'value': val,
-                                    'unit': '명',
-                                    'original_text': str(rows)
-                                })
-                    except: pass
+                for category, idx, unit in indicators:
+                    if idx < len(data_row):
+                        try:
+                            val_str = str(data_row[idx]).replace(',', '').strip()
+                            if val_str and val_str != '-':
+                                val = float(val_str)
+                                if val > 0:
+                                    normalized.append({
+                                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                                        'PERFORMANCE_YEAR': year,
+                                        'PERFORMANCE_TYPE': '인력양성',
+                                        'CATEGORY': category,
+                                        'VALUE': val,
+                                        'UNIT': unit,
+                                        'ORIGINAL_TEXT': str(rows)[:4000]
+                                    })
+                        except: pass
 
         return normalized
 
@@ -646,9 +648,8 @@ class GovernmentStandardNormalizer:
         if not self.current_context.get('sub_project_id'):
             return []
 
+        # ✅ PLAN_ID를 가져오되, 없으면 빈 문자열 (나중에 매칭)
         plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
-        if not plan_id:
-            return []
 
         # 1단계: 연도 컬럼 파싱
         year_columns = {}  # {컬럼 인덱스: (연도, 실적/계획)}
@@ -737,7 +738,7 @@ class GovernmentStandardNormalizer:
             total = amounts['gov'] + amounts['private'] + amounts['local'] + amounts['etc']
 
             record = {
-                'PLAN_ID': plan_id,
+                'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
                 'BUDGET_YEAR': year,
                 'CATEGORY': category,
                 'TOTAL_AMOUNT': total if total > 0 else None,
@@ -753,16 +754,18 @@ class GovernmentStandardNormalizer:
         return normalized
 
     def _process_overview(self, full_text: str, tables: List[Dict], page_number: int, raw_data_id: int):
-        """사업개요 처리 - TB_PLAN_DETAIL 업데이트"""
+        """사업개요 처리 - TB_PLAN_DATA 업데이트 (개선 버전)"""
 
         if not self.current_context.get('sub_project_id'):
             return
 
+        # ✅ PLAN_ID를 가져오되, 없으면 None (업데이트 불가)
         plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'])
         if not plan_id:
-            return
+            # 빈 문자열이나 TEMP_로 시작하면 진행 (나중에 매칭)
+            plan_id = ''
 
-        # 테이블에서 기본 정보 추출
+        # 테이블에서 기본 정보 추출 (다양한 키워드 매칭)
         overview_data = {}
         for table in tables:
             rows = table.get('data', [])
@@ -773,33 +776,210 @@ class GovernmentStandardNormalizer:
                     if key and value:
                         overview_data[key] = value
 
-        # full_text에서 사업목표, 사업내용 추출
+        # 대체 키워드 매핑
+        def get_value_with_alternatives(data: dict, *keys):
+            """여러 키워드를 시도하여 값 찾기"""
+            for key in keys:
+                if key in data and data[key]:
+                    return data[key]
+            return None
+
+        # full_text에서 사업목표, 사업내용 추출 (다양한 패턴)
         objective = ""
         content = ""
 
-        obj_match = re.search(r'○\s*사업목표\s*(.*?)(?:○\s*사업내용|$)', full_text, re.DOTALL)
-        if obj_match:
-            objective = obj_match.group(1).strip()
+        # 사업목표 추출 (여러 패턴 시도)
+        obj_patterns = [
+            r'○\s*사업목표\s*(.*?)(?:○\s*사업내용|○\s*추진내용|\(2\)|②|$)',
+            r'사업\s*목표\s*[:\s]*(.*?)(?:사업\s*내용|추진\s*내용|\(2\)|②|$)',
+            r'최종\s*목표\s*[:\s]*(.*?)(?:사업\s*내용|추진\s*내용|\(2\)|②|$)',
+        ]
+        for pattern in obj_patterns:
+            match = re.search(pattern, full_text, re.DOTALL | re.IGNORECASE)
+            if match:
+                objective = match.group(1).strip()
+                if len(objective) > 10:  # 최소 길이 체크
+                    break
 
-        content_match = re.search(r'○\s*사업내용\s*(.*?)(?:\(2\)|②|$)', full_text, re.DOTALL)
-        if content_match:
-            content = content_match.group(1).strip()
+        # 사업내용 추출 (여러 패턴 시도)
+        content_patterns = [
+            r'○\s*사업내용\s*(.*?)(?:\(2\)|②|③|$)',
+            r'사업\s*내용\s*[:\s]*(.*?)(?:\(2\)|②|③|$)',
+            r'추진\s*내용\s*[:\s]*(.*?)(?:\(2\)|②|③|$)',
+        ]
+        for pattern in content_patterns:
+            match = re.search(pattern, full_text, re.DOTALL | re.IGNORECASE)
+            if match:
+                content = match.group(1).strip()
+                if len(content) > 10:
+                    break
 
-        # TB_PLAN_DETAIL 레코드 찾아서 업데이트
-        for detail in self.data['details']:
-            if detail['PLAN_ID'] == plan_id:
-                detail['BIZ_TYPE'] = overview_data.get('사업성격', '')[:768] if overview_data.get('사업성격') else None
-                detail['REP_FLD'] = overview_data.get('대표분야', '')[:768] if overview_data.get('대표분야') else None
-                detail['LEAD_ORGAN_NM'] = overview_data.get('주관기관', '')[:768] if overview_data.get('주관기관') else None
-                detail['MNG_ORGAN_NM'] = overview_data.get('관리기관', '')[:768] if overview_data.get('관리기관') else None
-                detail['LAST_GOAL'] = objective[:4000] if objective else None
-                detail['BIZ_CONTENTS'] = content[:4000] if content else None
+        # ✨ 신규: 텍스트 본문에서 주관기관, 관리기관 추출 (PDF 구조 반영)
+        lead_organ_text = None
+        mng_organ_text = None
+
+        # 주관기관 패턴 (예: "○ 주관기관 : 과학기술정보통신부")
+        lead_patterns = [
+            r'○\s*주관기관\s*[:：]\s*([^\n○]+)',
+            r'주관\s*기관\s*[:：]\s*([^\n○]+)',
+            r'○\s*추진기관\s*[:：]\s*([^\n○]+)',
+        ]
+        for pattern in lead_patterns:
+            match = re.search(pattern, full_text, re.IGNORECASE)
+            if match:
+                lead_organ_text = match.group(1).strip()
+                if len(lead_organ_text) > 2:
+                    break
+
+        # 관리기관 패턴 (예: "○ 관리기관 : 한국연구재단")
+        mng_patterns = [
+            r'○\s*관리기관\s*[:：]\s*([^\n○]+)',
+            r'관리\s*기관\s*[:：]\s*([^\n○]+)',
+            r'○\s*전담기관\s*[:：]\s*([^\n○]+)',
+        ]
+        for pattern in mng_patterns:
+            match = re.search(pattern, full_text, re.IGNORECASE)
+            if match:
+                mng_organ_text = match.group(1).strip()
+                if len(mng_organ_text) > 2:
+                    break
+
+        # ✨ 신규: 대표분야 및 비중 텍스트 파싱 (예: "대표분야 생명과학 비중 생명과학(100), Red(10), Green(10), White(10)")
+        rep_fld_text = None
+        biology_wei = None
+        red_wei = None
+        green_wei = None
+        white_wei = None
+
+        # 대표분야 패턴
+        rep_fld_patterns = [
+            r'대표분야\s*[:：]?\s*([가-힣]+)',
+            r'대표\s*분야\s*[:：]?\s*([가-힣]+)',
+        ]
+        for pattern in rep_fld_patterns:
+            match = re.search(pattern, full_text, re.IGNORECASE)
+            if match:
+                rep_fld_text = match.group(1).strip()
+                break
+
+        # 비중 패턴 (예: "생명과학(100), Red(10), Green(10), White(10)")
+        weight_pattern = r'비중\s*[:：]?\s*([^\n○]+)'
+        weight_match = re.search(weight_pattern, full_text, re.IGNORECASE)
+        if weight_match:
+            weight_text = weight_match.group(1).strip()
+
+            # 개별 가중치 추출 (생명과학(100), Red(10) 형식)
+            biology_match = re.search(r'생명과학\s*\((\d+)\)', weight_text)
+            if biology_match:
+                biology_wei = int(biology_match.group(1))
+
+            red_match = re.search(r'Red\s*\((\d+)\)', weight_text, re.IGNORECASE)
+            if red_match:
+                red_wei = int(red_match.group(1))
+
+            green_match = re.search(r'Green\s*\((\d+)\)', weight_text, re.IGNORECASE)
+            if green_match:
+                green_wei = int(green_match.group(1))
+
+            white_match = re.search(r'White\s*\((\d+)\)', weight_text, re.IGNORECASE)
+            if white_match:
+                white_wei = int(white_match.group(1))
+
+        # TB_PLAN_DATA 레코드 찾아서 업데이트
+        for plan_data in self.data['plan_data']:
+            if plan_data['PLAN_ID'] == plan_id:
+                # ✅ 부처명 (NATION_ORGAN_NM) - 필수 필드!
+                nation_organ = get_value_with_alternatives(
+                    overview_data,
+                    '부처명', '소관부처', '소관', '부처',
+                    '주무부처', '담당부처'
+                )
+                if not nation_organ:
+                    # 본문에서 『부처명』 패턴 추출
+                    bracket_match = re.search(r'『\s*([^』]+)\s*』', full_text)
+                    if bracket_match:
+                        nation_organ = bracket_match.group(1).strip()
+
+                if not nation_organ and lead_organ_text:
+                    # 주관기관에서 "~부" 형태 추출
+                    lead_organ_str = str(lead_organ_text) if lead_organ_text else ""
+                    ministry_match = re.search(r'([가-힣]+부)(?:관리기관|전담기관|주관|[\s:]|$)', lead_organ_str)
+                    if ministry_match:
+                        nation_organ = ministry_match.group(1).strip()
+
+                # 필수 필드 - NULL 방지
+                if nation_organ:
+                    plan_data['NATION_ORGAN_NM'] = self._clean_text(nation_organ, 768)
+                else:
+                    logger.warning(f"⚠️ 부처명 미추출: {plan_data.get('BIZ_NM', 'unknown')}")
+                    plan_data['NATION_ORGAN_NM'] = "미분류"
+
+                # ✅ DETAIL_BIZ_NM: 세부사업명 (overview 테이블의 "세부사업명")
+                detail_biz_nm = get_value_with_alternatives(overview_data, '세부사업명', '사업명', '사업이름')
+                if detail_biz_nm:
+                    plan_data['DETAIL_BIZ_NM'] = self._clean_text(detail_biz_nm, 768)
+
+                # ✅ BIZ_NM: 내역사업명 (overview 테이블의 "내역사업명")
+                biz_nm = get_value_with_alternatives(overview_data, '내역사업명')
+                if biz_nm:
+                    plan_data['BIZ_NM'] = self._clean_text(biz_nm, 768)
+
+                biz_type = get_value_with_alternatives(overview_data, '사업성격', '사업유형', '유형')
+                plan_data['BIZ_TYPE'] = self._clean_text(biz_type, 768) if biz_type else None
+
+                rep_fld = rep_fld_text if rep_fld_text else get_value_with_alternatives(overview_data, '대표분야', '분야', '대표 분야')
+                plan_data['REP_FLD'] = self._clean_text(rep_fld, 768) if rep_fld else None
+
+                # 가중치 (텍스트에서 추출한 값 저장)
+                if biology_wei is not None:
+                    plan_data['BIOLOGY_WEI'] = biology_wei
+                if red_wei is not None:
+                    plan_data['RED_WEI'] = red_wei
+                if green_wei is not None:
+                    plan_data['GREEN_WEI'] = green_wei
+                if white_wei is not None:
+                    plan_data['WHITE_WEI'] = white_wei
+
+                # 3대 영역
+                area = get_value_with_alternatives(overview_data, '3대영역', '3대 영역', '영역')
+                plan_data['AREA'] = area[:768] if area else None
+
+                # 주관기관 (텍스트 추출 우선, 없으면 테이블에서)
+                lead_organ = lead_organ_text if lead_organ_text else get_value_with_alternatives(
+                    overview_data,
+                    '주관기관', '주관 기관', '주관기관명',
+                    '주관', '주관부처', '전담기관'
+                )
+                plan_data['LEAD_ORGAN_NM'] = self._clean_text(lead_organ, 768) if lead_organ else None
+
+                # 관리기관 (텍스트 추출 우선, 없으면 테이블에서)
+                mng_organ = mng_organ_text if mng_organ_text else get_value_with_alternatives(
+                    overview_data,
+                    '관리기관', '관리 기관', '관리기관명',
+                    '총괄기관', '전문기관'
+                )
+                plan_data['MNG_ORGAN_NM'] = self._clean_text(mng_organ, 768) if mng_organ else None
+
+                # 최종목표
+                plan_data['LAST_GOAL'] = self._clean_text(objective, 4000) if objective else None
+
+                # 사업내용
+                plan_data['BIZ_CONTENTS'] = self._clean_text(content, 4000) if content else None
+
+                # 디버그 로그 (처음 3개 사업만)
+                if plan_data['NUM'] <= 3:
+                    logger.debug(f"📋 PLAN_ID {plan_id} overview 업데이트:")
+                    logger.debug(f"  - BIZ_TYPE: {'✅' if plan_data['BIZ_TYPE'] else '❌'}")
+                    logger.debug(f"  - LEAD_ORGAN_NM: {'✅' if plan_data['LEAD_ORGAN_NM'] else '❌'}")
+                    logger.debug(f"  - LAST_GOAL: {'✅' if plan_data['LAST_GOAL'] else '❌'} ({len(objective) if objective else 0}자)")
+                    logger.debug(f"  - BIZ_CONTENTS: {'✅' if plan_data['BIZ_CONTENTS'] else '❌'} ({len(content) if content else 0}자)")
+
                 break
 
     def _process_sub_project(self, text: str, tables: List[Dict]) -> bool:
-        """내역사업 처리"""
-        sub_project_name = None
-        main_project_name = None
+        """내역사업 처리 - TB_PLAN_DATA 생성"""
+        biz_name = None         # 내역사업명 → BIZ_NM
+        detail_biz_name = None  # 세부사업명 → DETAIL_BIZ_NM
 
         # 테이블에서 찾기
         for table in tables:
@@ -812,72 +992,119 @@ class GovernmentStandardNormalizer:
                 value = str(row[1]).strip()
 
                 if '내역사업명' in key and value:
-                    sub_project_name = value
-                elif '세부사업명' in key:
-                    main_project_name = value
+                    biz_name = value         # 내역사업명 → BIZ_NM
+                elif '세부사업명' in key and value:  # ✅ value 체크 추가
+                    detail_biz_name = value  # 세부사업명 → DETAIL_BIZ_NM
 
         # 텍스트에서 찾기 (테이블에서 못 찾았을 경우)
-        if not sub_project_name:
+        if not biz_name:
             match = re.search(r'내역사업명\s+([^\n]+)', text)
             if match:
-                sub_project_name = match.group(1).strip()
+                biz_name = match.group(1).strip()
 
-        if not main_project_name:
+        if not detail_biz_name:
             match = re.search(r'세부사업명\s+([^\n]+)', text)
             if match:
-                main_project_name = match.group(1).strip()
+                detail_biz_name = match.group(1).strip()
 
-        if not sub_project_name:
+        if not biz_name:
             return False
 
-        # 이미 등록된 내역사업인지 체크
-        for master in self.data['master']:
-            if master['DETAIL_BIZ_NM'] == sub_project_name:
-                self.current_context['sub_project_id'] = master['_internal_id']
-                logger.info(f"📌 기존 내역사업 재사용: {sub_project_name} (PLAN_ID: {master['PLAN_ID']})")
+        # ✅ DETAIL_BIZ_NM이 없으면 BIZ_NM을 기본값으로 사용
+        if not detail_biz_name:
+            detail_biz_name = biz_name
+            logger.debug(f"  📌 DETAIL_BIZ_NM 없음 → BIZ_NM 사용: {biz_name}")
+
+        # 이미 등록된 내역사업인지 체크 (DETAIL_BIZ_NM = 내역사업명)
+        for plan_data in self.data['plan_data']:
+            if plan_data['DETAIL_BIZ_NM'] == detail_biz_name:  # ✅ detail_biz_name은 내역사업명
+                self.current_context['sub_project_id'] = plan_data['_internal_id']
+                logger.info(f"📌 기존 내역사업 재사용: {detail_biz_name} (PLAN_ID: {plan_data['PLAN_ID']})")
                 return True
+
+        # ✅ 기존 Oracle DB에서 PLAN_ID 조회 (캐시에서)
+        existing_plan_id = None
+        year = self.current_context['document_year']
+
+        # ✅ 매칭용 정규화 적용 (괄호, 공백, 특수문자 모두 제거)
+        biz_nm_normalized = self._normalize_for_matching(biz_name) if biz_name else ""
+        detail_biz_nm_normalized = self._normalize_for_matching(detail_biz_name) if detail_biz_name else ""
+
+        # 캐시에서 매칭 시도 (YEAR, BIZ_NM, DETAIL_BIZ_NM)
+        key = (year, biz_nm_normalized, detail_biz_nm_normalized)
+        logger.info(f"🔍 매칭 시도: YEAR={year}, BIZ_NM='{biz_name}', DETAIL_BIZ_NM='{detail_biz_name}'")
+        logger.debug(f"   정규화된 키: ({year}, '{biz_nm_normalized}', '{detail_biz_nm_normalized}')")
+        existing_plan_id = self.existing_plan_data.get(key)
+
+        if existing_plan_id:
+            logger.info(f"✅ 기존 DB에서 PLAN_ID 발견: {biz_name} -> {existing_plan_id}")
+        else:
+            logger.warning(f"❌ 매칭 실패 - BIZ_NM: '{biz_name}', DETAIL_BIZ_NM: '{detail_biz_name}'")
 
         # 새로운 내역사업 생성
         sub_id = self._get_next_id('sub_project')
 
-        # Oracle DB PLAN_ID 형식: 년도 + 3자리 일련번호 (예: 2024001)
-        plan_id = f"{self.current_context['document_year']}{str(sub_id).zfill(3)}"
+        # PLAN_ID 결정
+        if existing_plan_id:
+            # 기존 DB에 있으면 해당 PLAN_ID 사용
+            plan_id = existing_plan_id
+            logger.info(f"🔍 기존 PLAN_ID 사용: {plan_id}")
+        else:
+            # 매칭 실패 시 임시 PLAN_ID 생성: TEMP_년도_일련번호
+            # 나중에 load_oracle_direct에서 이를 감지하고 실제 매칭 수행
+            plan_id = f"TEMP_{year}_{str(sub_id).zfill(3)}"
+            logger.warning(f"⚠️ 신규 내역사업 (임시 PLAN_ID 생성): {plan_id}")
 
-        # TB_PLAN_MASTER 레코드 생성
-        master_record = {
-            '_internal_id': sub_id,  # 내부 매핑용 (CSV 저장 안함)
+        # TB_PLAN_DATA 레코드 생성 (회사 기존 43개 컬럼)
+        # ✅ 페이지 텍스트에서 부처명(NATION_ORGAN_NM) 추출
+        nation_organ = None
+        bracket_match = re.search(r'『\s*([^』]+)\s*』', text)
+        if bracket_match:
+            nation_organ = bracket_match.group(1).strip()
+
+        # TB_PLAN_DATA 레코드 생성 (회사 기존 43개 컬럼)
+        plan_data_record = {
+            '_internal_id': sub_id,
             'PLAN_ID': plan_id,
             'YEAR': self.current_context['document_year'],
             'NUM': sub_id,
-            'NATION_ORGAN_NM': '과학기술정보통신부',
-            'BIZ_NM': main_project_name or '바이오·의료기술개발사업',
-            'DETAIL_BIZ_NM': sub_project_name
-        }
-
-        # TB_PLAN_DETAIL 레코드 생성 (초기값, 나중에 overview에서 업데이트)
-        detail_record = {
-            'DETAIL_ID': f"{plan_id}D01",
-            'PLAN_ID': plan_id,
+            'NATION_ORGAN_NM': self._clean_text(nation_organ, 768) if nation_organ else "미분류",
+            'BIZ_NM': biz_name if biz_name else '',  # 내역사업명 → BIZ_NM
+            'DETAIL_BIZ_NM': detail_biz_name if detail_biz_name else '',  # 세부사업명 → DETAIL_BIZ_NM
             'BIZ_TYPE': None,
-            'REP_FLD': None,
             'AREA': None,
+            'REP_FLD': None,
+            'BIOLOGY_WEI': None,  # 가중치는 NULL (나중에 수동 입력)
+            'RED_WEI': None,
+            'GREEN_WEI': None,
+            'WHITE_WEI': None,
+            'FUSION_WEI': None,
             'LEAD_ORGAN_NM': None,
             'MNG_ORGAN_NM': None,
             'BIZ_SDT': None,
             'BIZ_EDT': None,
             'RESPERIOD': None,
             'CUR_RESPERIOD': None,
+            'TOTAL_RESPRC': None,  # 나중에 예산 테이블에서 집계
+            'TOTAL_RESPRC_GOV': None,
+            'TOTAL_RESPRC_CIV': None,
+            'CUR_RESPRC': None,
+            'CUR_RESPRC_GOV': None,
+            'CUR_RESPRC_CIV': None,
             'LAST_GOAL': None,
             'BIZ_CONTENTS': None,
-            'BIZ_CONTENTS_KEYWORD': None
+            'BIZ_CONTENTS_KEYWORD': None,
+            'REGUL_WEI': None,
+            'WEI': None,
+            'PERFORM_PRC': None,
+            'PLAN_PRC': None
         }
 
-        self.data['master'].append(master_record)
-        self.data['details'].append(detail_record)
+        self.data['plan_data'].append(plan_data_record)
         self.current_context['sub_project_id'] = sub_id
         self.plan_id_mapping[sub_id] = plan_id  # 매핑 저장
 
-        logger.info(f"✅ 내역사업 등록: {sub_project_name} (ID: {sub_id}, PLAN_ID: {plan_id})")
+        logger.info(f"✅ 내역사업 등록: {detail_biz_name} (ID: {sub_id}, PLAN_ID: {plan_id})")
         return True
 
 
@@ -913,11 +1140,12 @@ class GovernmentStandardNormalizer:
 
                 # sub_project가 페이지에 명시되어 있으면 설정/전환 (null이 아닐 때만)
                 if page_sub_project:
-                    # 이미 등록된 내역사업인지 체크
+                    # 이미 등록된 내역사업인지 체크 (BIZ_NM = 내역사업명)
                     existing_project = None
-                    for master in self.data['master']:
-                        if master['DETAIL_BIZ_NM'] == page_sub_project:
-                            existing_project = master
+                    for plan_data in self.data['plan_data']:
+                        # BIZ_NM(내역사업명)으로 매칭
+                        if plan_data['BIZ_NM'] == page_sub_project:
+                            existing_project = plan_data
                             break
 
                     if existing_project:
@@ -946,19 +1174,12 @@ class GovernmentStandardNormalizer:
                     0
                 )
 
-                # ⭐ 대표성과와 주요계획은 모든 페이지에서 추출 (category와 무관)
+                # ⭐ 대표성과는 모든 페이지에서 추출 (category와 무관)
                 if self.current_context.get('sub_project_id'):
                     # 대표성과 추출
                     if '① 대표성과' in page_full_text:
                         achievements = self._extract_key_achievements(page_full_text, page_num)
-                        self.data['key_achievements'].extend(achievements)
-
-                    # 주요 추진계획 추출 (여러 패턴 지원)
-                    if ('① 주요 추진계획' in page_full_text or
-                        '① 주요추진계획' in page_full_text or
-                        re.search(r'\(3\)\s*\d{4}년도\s*추진계획', page_full_text)):
-                        plan_details = self._extract_plan_details(page_full_text, page_num)
-                        self.data['plan_details'].extend(plan_details)
+                        self.data['achievements'].extend(achievements)
 
                 # 카테고리별 처리
                 if page_category == 'overview':
@@ -1034,7 +1255,26 @@ class GovernmentStandardNormalizer:
 
                         self.validation_stats['processed_tables'] += 1
 
-            logger.info(f"✅ 정규화 완료: {len(self.data['master'])}개 내역사업")
+            # ✅ 최종 단계: "미분류" NATION_ORGAN_NM 재검색
+            logger.info("🔍 미분류 부처명 재검색 중...")
+            for plan_data in self.data['plan_data']:
+                if plan_data['NATION_ORGAN_NM'] == "미분류":
+                    # 해당 내역사업의 모든 페이지에서 『』 패턴 찾기
+                    sub_project_name = plan_data['BIZ_NM']  # 내역사업명
+
+                    for page in pages_data:
+                        page_full_text = page.get('full_text', '')
+
+                        # 이 페이지가 해당 내역사업과 관련있는지 확인
+                        if sub_project_name in page_full_text:
+                            bracket_match = re.search(r'『\s*([^』]+)\s*』', page_full_text)
+                            if bracket_match:
+                                nation_organ = bracket_match.group(1).strip()
+                                plan_data['NATION_ORGAN_NM'] = self._clean_text(nation_organ, 768)
+                                logger.info(f"✅ 부처명 발견: {sub_project_name} -> {nation_organ}")
+                                break
+
+            logger.info(f"✅ 정규화 완료: {len(self.data['plan_data'])}개 내역사업")
             return True
 
         except Exception as e:
@@ -1044,35 +1284,55 @@ class GovernmentStandardNormalizer:
             return False
 
     def save_to_csv(self):
-        """CSV 저장 - Oracle DB 스키마에 맞춤"""
+        """CSV 저장 - TB_PLAN_DATA 기반 스키마"""
 
-        # TB_PLAN_MASTER (내부 ID 제외)
-        if self.data['master']:
-            csv_path = self.output_dir / "TB_PLAN_MASTER.csv"
+        # ✅ 1단계: 하위 테이블에 PLAN_ID 채우기 (plan_id_mapping 사용)
+        for budget in self.data['budgets']:
+            if not budget.get('PLAN_ID') or budget['PLAN_ID'] == '':
+                # _internal_id를 통해 PLAN_ID 찾기 (이미 정규화 단계에서 채워짐)
+                # 하지만 정규화 시 sub_project_id로 저장되었으므로, plan_data에서 찾아야 함
+                pass  # 이미 정규화 단계에서 채워져 있어야 함
+
+        for schedule in self.data['schedules']:
+            if not schedule.get('PLAN_ID') or schedule['PLAN_ID'] == '':
+                pass  # 이미 정규화 단계에서 채워져 있어야 함
+
+        for performance in self.data['performances']:
+            if not performance.get('PLAN_ID') or performance['PLAN_ID'] == '':
+                pass  # 이미 정규화 단계에서 채워져 있어야 함
+
+        for achievement in self.data['achievements']:
+            if not achievement.get('PLAN_ID') or achievement['PLAN_ID'] == '':
+                pass  # 이미 정규화 단계에서 채워져 있어야 함
+
+        # ✅ 2단계: TB_PLAN_DATA 집계 필드 계산
+        self._aggregate_plan_data_fields()
+
+
+        # TB_PLAN_DATA (회사 기존 43개 컬럼, _internal_id 제외)
+        if self.data['plan_data']:
+            csv_path = self.output_dir / "TB_PLAN_DATA.csv"
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                fieldnames = ['PLAN_ID', 'YEAR', 'NUM', 'NATION_ORGAN_NM', 'BIZ_NM', 'DETAIL_BIZ_NM']
+                # _internal_id 제외한 전체 컬럼
+                fieldnames = [k for k in self.data['plan_data'][0].keys()
+                            if k != '_internal_id']
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
-                for record in self.data['master']:
-                    # _internal_id는 저장하지 않음
-                    row = {k: v for k, v in record.items() if k != '_internal_id'}
+                for record in self.data['plan_data']:
+                    row = {k: v for k, v in record.items()
+                          if k != '_internal_id'}
                     writer.writerow(row)
-            logger.info(f"✅ TB_PLAN_MASTER.csv 저장 ({len(self.data['master'])}건)")
-
-        # TB_PLAN_DETAIL
-        if self.data['details']:
-            csv_path = self.output_dir / "TB_PLAN_DETAIL.csv"
-            with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.DictWriter(f, fieldnames=self.data['details'][0].keys())
-                writer.writeheader()
-                writer.writerows(self.data['details'])
-            logger.info(f"✅ TB_PLAN_DETAIL.csv 저장 ({len(self.data['details'])}건)")
+            logger.info(f"✅ TB_PLAN_DATA.csv 저장 ({len(self.data['plan_data'])}건)")
 
         # TB_PLAN_BUDGET
         if self.data['budgets']:
             csv_path = self.output_dir / "TB_PLAN_BUDGET.csv"
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.DictWriter(f, fieldnames=self.data['budgets'][0].keys())
+                # ✅ PLAN_ID를 첫 번째 컬럼으로
+                fieldnames = ['PLAN_ID', 'BUDGET_YEAR', 'CATEGORY', 'TOTAL_AMOUNT',
+                             'GOV_AMOUNT', 'PRIVATE_AMOUNT', 'LOCAL_AMOUNT', 'ETC_AMOUNT',
+                             'PERFORM_PRC', 'PLAN_PRC']
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
                 writer.writerows(self.data['budgets'])
             logger.info(f"✅ TB_PLAN_BUDGET.csv 저장 ({len(self.data['budgets'])}건)")
@@ -1081,7 +1341,10 @@ class GovernmentStandardNormalizer:
         if self.data['schedules']:
             csv_path = self.output_dir / "TB_PLAN_SCHEDULE.csv"
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.DictWriter(f, fieldnames=self.data['schedules'][0].keys())
+                # ✅ PLAN_ID를 첫 번째 컬럼으로
+                fieldnames = ['PLAN_ID', 'SCHEDULE_YEAR', 'QUARTER', 'TASK_NAME',
+                             'TASK_CONTENT', 'START_DATE', 'END_DATE']
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
                 writer.writerows(self.data['schedules'])
             logger.info(f"✅ TB_PLAN_SCHEDULE.csv 저장 ({len(self.data['schedules'])}건)")
@@ -1090,19 +1353,26 @@ class GovernmentStandardNormalizer:
         if self.data['performances']:
             csv_path = self.output_dir / "TB_PLAN_PERFORMANCE.csv"
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.DictWriter(f, fieldnames=self.data['performances'][0].keys())
+                # ✅ PLAN_ID를 첫 번째 컬럼으로
+                fieldnames = ['PLAN_ID', 'PERFORMANCE_YEAR', 'PERFORMANCE_TYPE', 'CATEGORY',
+                             'INDICATOR_NAME', 'TARGET_VALUE', 'ACTUAL_VALUE', 'UNIT',
+                             'ORIGINAL_TEXT', 'VALUE']
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
                 writer.writerows(self.data['performances'])
             logger.info(f"✅ TB_PLAN_PERFORMANCE.csv 저장 ({len(self.data['performances'])}건)")
 
-        # TB_PLAN_WEIGHT (현재는 비어있을 수 있음)
-        if self.data['weights']:
-            csv_path = self.output_dir / "TB_PLAN_WEIGHT.csv"
+        # TB_PLAN_ACHIEVEMENTS
+        if self.data['achievements']:
+            csv_path = self.output_dir / "TB_PLAN_ACHIEVEMENTS.csv"
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.DictWriter(f, fieldnames=self.data['weights'][0].keys())
+                # ✅ PLAN_ID를 첫 번째 컬럼으로 명시적 순서 지정
+                fieldnames = ['PLAN_ID', 'ACHIEVEMENT_YEAR', 'ACHIEVEMENT_TYPE',
+                             'TITLE', 'DESCRIPTION', 'PAGE_NUMBER']
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
-                writer.writerows(self.data['weights'])
-            logger.info(f"✅ TB_PLAN_WEIGHT.csv 저장 ({len(self.data['weights'])}건)")
+                writer.writerows(self.data['achievements'])
+            logger.info(f"✅ TB_PLAN_ACHIEVEMENTS.csv 저장 ({len(self.data['achievements'])}건)")
 
         # 원본 데이터 (감사용)
         if self.data['raw_data']:
@@ -1116,22 +1386,21 @@ class GovernmentStandardNormalizer:
     def print_statistics(self):
         """통계 출력"""
         print("\n" + "="*80)
-        print("📊 정부 표준 정규화 완료 (Oracle DB 스키마)")
+        print("📊 정부 표준 정규화 완료 (TB_PLAN_DATA + 하위 테이블)")
         print("="*80)
 
-        print(f"\n📁 내역사업 (TB_PLAN_MASTER): {len(self.data['master'])}개")
-        for master in self.data['master'][:10]:  # 처음 10개만 표시
-            print(f"  - {master['DETAIL_BIZ_NM']} (PLAN_ID: {master['PLAN_ID']})")
-        if len(self.data['master']) > 10:
-            print(f"  ... 외 {len(self.data['master']) - 10}개")
+        print(f"\n📁 내역사업 (TB_PLAN_DATA): {len(self.data['plan_data'])}개")
+        for plan_data in self.data['plan_data'][:10]:  # 처음 10개만 표시
+            print(f"  - {plan_data['BIZ_NM']} (PLAN_ID: {plan_data['PLAN_ID']})")
+        if len(self.data['plan_data']) > 10:
+            print(f"  ... 외 {len(self.data['plan_data']) - 10}개")
 
         print(f"\n📋 Oracle 테이블별 데이터 통계:")
-        print(f"  TB_PLAN_MASTER:      {len(self.data['master'])}건")
-        print(f"  TB_PLAN_DETAIL:      {len(self.data['details'])}건")
+        print(f"  TB_PLAN_DATA:        {len(self.data['plan_data'])}건")
         print(f"  TB_PLAN_BUDGET:      {len(self.data['budgets'])}건")
         print(f"  TB_PLAN_SCHEDULE:    {len(self.data['schedules'])}건")
         print(f"  TB_PLAN_PERFORMANCE: {len(self.data['performances'])}건")
-        print(f"  TB_PLAN_WEIGHT:      {len(self.data['weights'])}건")
+        print(f"  TB_PLAN_ACHIEVEMENTS: {len(self.data['achievements'])}건")
         print(f"  raw_data (감사용):    {len(self.data['raw_data'])}건")
 
         print("="*80 + "\n")

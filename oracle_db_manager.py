@@ -4,7 +4,6 @@ Oracle 데이터베이스 연결 및 관리 모듈
 import oracledb
 import logging
 from typing import Dict, List, Any, Optional
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -56,15 +55,24 @@ class OracleDBManager:
             logger.error(f"❌ DDL 실행 실패: {error}")
             raise
 
-    def execute_query(self, query: str, params: Optional[tuple] = None) -> List[tuple]:
-        """쿼리 실행 및 결과 반환"""
+    def execute_query(self, query: str, params: Optional[Dict or tuple] = None):
+        """
+        쿼리 실행 및 커서 반환
+
+        Args:
+            query: SQL 쿼리문
+            params: 파라미터 (dict 또는 tuple)
+
+        Returns:
+            cursor: 결과를 fetch할 수 있는 커서
+        """
         try:
             if params:
                 self.cursor.execute(query, params)
             else:
                 self.cursor.execute(query)
 
-            return self.cursor.fetchall()
+            return self.cursor
 
         except oracledb.Error as error:
             logger.error(f"❌ 쿼리 실행 실패: {error}")
@@ -137,7 +145,7 @@ class OracleDBManager:
         else:
             next_num = max_num + 1
 
-        # 2023001 형식으로 반환
+        # 년도+번호 형식으로 반환
         return f"{year}{next_num:03d}"
 
     def plan_id_exists(self, plan_id: str) -> bool:
