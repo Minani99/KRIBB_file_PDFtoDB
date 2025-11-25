@@ -101,6 +101,17 @@ class OracleDBManager:
 
     def close(self):
         """연결 종료"""
+        try:
+            if self.cursor:
+                self.cursor.close()
+            if self.connection:
+                self.connection.close()
+                logger.info("🔌 Oracle 연결 종료")
+        except Exception as e:
+            logger.warning(f"연결 종료 중 오류: {e}")
+
+    def close(self):
+        """연결 종료"""
         if self.cursor:
             self.cursor.close()
         if self.connection:

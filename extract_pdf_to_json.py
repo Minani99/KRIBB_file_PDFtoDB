@@ -23,10 +23,20 @@ except ImportError:
     PDF_AVAILABLE = False
     logger.warning("pdfplumber not installed. Using sample data mode.")
 
+try:
+    import PyPDF2
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    PYPDF2_AVAILABLE = False
+    logger.warning("PyPDF2 not installed. CID font fallback disabled.")
+
 
 class GovernmentPDFExtractor:
     """정부 문서 PDF 추출 클래스"""
     
+    # CID 패턴 (정규식)
+    CID_PATTERN = re.compile(r'\(cid:\d+\)')
+
     def __init__(self, pdf_path: str = None, output_dir: str = None):
         """
         Args:
@@ -63,6 +73,64 @@ class GovernmentPDFExtractor:
             'sub_projects': []
         }
     
+    def _clean_cid_text(self, text: str) -> str:
+        """
+        CID 폰트 코드 정리
+        (cid:XXXX) 패턴을 제거하거나 대체
+
+        Args:
+            text: 원본 텍스트
+
+        Returns:
+            정리된 텍스트
+        """
+        if not text:
+            return ""
+
+        # CID 코드 제거
+        cleaned = self.CID_PATTERN.sub('', text)
+
+        # 연속된 공백 정리
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+        # 완전히 비어있으면 원본 반환 (CID만 있었던 경우)
+        if not cleaned:
+            return text
+
+        return cleaned
+
+    def _extract_text_with_fallback(self, page) -> str:
+        """
+        CID 폰트 대응 텍스트 추출 (다중 방식 시도)
+
+        1. pdfplumber 기본 추출
+        2. CID 정리 후 반환
+        3. PyPDF2 fallback (옵션)
+
+        Args:
+            page: pdfplumber page 객체
+
+        Returns:
+            추출된 텍스트
+        """
+        # 1차: pdfplumber 기본 추출
+        text = page.extract_text() or ""
+
+        # CID 코드가 많으면 정리
+        cid_count = len(self.CID_PATTERN.findall(text))
+        if cid_count > 10:  # CID가 10개 이상이면 문제 있음
+            logger.warning(f"  ⚠️  CID 폰트 감지 ({cid_count}개) - 정리 중...")
+            cleaned_text = self._clean_cid_text(text)
+
+            # 정리 후 텍스트가 너무 짧으면 경고
+            if len(cleaned_text) < len(text) * 0.3:
+                logger.warning(f"  ⚠️  CID 정리 후 텍스트 손실 심함 (원본:{len(text)} → 정리:{len(cleaned_text)})")
+                logger.warning(f"  💡 수동 확인 권장: 해당 페이지 텍스트 추출 품질 낮음")
+
+            return cleaned_text
+
+        return text
+
     def extract(self) -> Dict[str, Any]:
         """PDF에서 데이터 추출"""
         if not PDF_AVAILABLE:
@@ -113,9 +181,9 @@ class GovernmentPDFExtractor:
         """페이지 처리"""
         logger.info(f"📄 페이지 {page_num} 처리 중...")
         
-        # 텍스트 추출
-        full_text = page.extract_text() or ""
-        
+        # 텍스트 추출 (CID 대응)
+        full_text = self._extract_text_with_fallback(page)
+
         # 카테고리 감지
         category = self._detect_category(full_text)
         if category:
@@ -183,6 +251,10 @@ class GovernmentPDFExtractor:
                 for cell in row:
                     if cell:
                         cell_str = str(cell).strip()
+
+                        # CID 코드 정리
+                        cell_str = self._clean_cid_text(cell_str)
+
                         # 한글 단어 중간에 공백이 하나씩 끼어있는 경우 제거
                         # "정 부" -> "정부", "민 간" -> "민간"
                         if re.match(r'^[\u3131-\u3163\uac00-\ud7a3]\s[\u3131-\u3163\uac00-\ud7a3]$', cell_str):

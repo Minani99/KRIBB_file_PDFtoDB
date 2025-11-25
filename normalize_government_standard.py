@@ -242,8 +242,16 @@ class GovernmentStandardNormalizer:
 
     def _load_existing_plan_data(self):
         """기존 PLAN_DATA를 DB에서 로드 (캐시용)"""
-        logger.info("[LOAD] 기존 PLAN_DATA 로드 중...")
+        logger.info("🔄 기존 PLAN_DATA 로드 중...")
         try:
+            if not self.db_manager:
+                logger.warning("⚠️ DB 매니저가 없습니다. 매칭 불가능.")
+                return
+
+            if not self.db_manager.connection:
+                logger.warning("⚠️ DB 연결이 없습니다. 매칭 불가능.")
+                return
+
             cursor = self.db_manager.connection.cursor()
             query = """
                 SELECT PLAN_ID, YEAR, BIZ_NM, DETAIL_BIZ_NM
@@ -262,14 +270,14 @@ class GovernmentStandardNormalizer:
                 key = (year, biz_nm_clean, detail_biz_nm_clean)
                 self.existing_plan_data[key] = plan_id.strip() if plan_id else None
 
-                # 디버깅: 2021년 데이터 처음 10개 출력
-                if year == 2021 and count <= 10:
-                    logger.info(f"   [{plan_id}] BIZ='{biz_nm_clean}' / DETAIL='{detail_biz_nm_clean}'")
+                # 디버깅: 각 연도별 처음 2개만 출력
+                if count <= 10:
+                    logger.info(f"   DB 키: ({year}, '{biz_nm_clean[:30]}...', '{detail_biz_nm_clean[:30]}...') -> {plan_id}")
 
             cursor.close()
-            logger.info(f"[OK] 기존 PLAN_DATA 로드 완료: {len(self.existing_plan_data)}건")
+            logger.info(f"✅ 기존 PLAN_DATA 로드 완료: {len(self.existing_plan_data)}건")
         except Exception as e:
-            logger.warning(f"[WARN] 기존 PLAN_DATA 로드 실패: {e}")
+            logger.error(f"❌ 기존 PLAN_DATA 로드 실패: {e}", exc_info=True)
 
     def _get_next_id(self, entity_type: str) -> int:
         """ID 생성"""

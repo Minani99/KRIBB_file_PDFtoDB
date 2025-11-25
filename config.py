@@ -17,23 +17,23 @@ NORMALIZED_OUTPUT_GOVERNMENT_DIR.mkdir(exist_ok=True)
 
 
 # ==================== Oracle 데이터베이스 설정 ====================
-# BICS 개발 스키마 (기존 TB_PLAN_DATA 접근용)
+# 개발/테스트용 BICS_DEV 계정 (CSV 적재용)
 ORACLE_CONFIG = {
-    "host": "192.168.73.208",
-    "port": 1521,
-    "sid": "bics",
-    "user": "bics",  # BICS 개발 계정 (기존 데이터 매칭용)
-    "password": "!@Bicsmain!@#",
-    "charset": "UTF8"
-}
-
-# 개발/테스트용 BICS_DEV 계정 (필요시 사용)
-ORACLE_CONFIG_DEV = {
     "host": "192.168.73.208",
     "port": 1521,
     "sid": "bics",
     "user": "bics_dev",
     "password": "bics_dev",
+    "charset": "UTF8"
+}
+
+# BICS 개발 스키마 (기존 TB_PLAN_DATA 조회용)
+ORACLE_CONFIG_BICS = {
+    "host": "192.168.73.208",
+    "port": 1521,
+    "sid": "bics",
+    "user": "bics",
+    "password": "!@Bicsmain!@#",
     "charset": "UTF8"
 }
 
