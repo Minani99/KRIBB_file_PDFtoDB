@@ -1,10 +1,11 @@
-import json
+﻿import json
 import csv
 import re
 from pathlib import Path
 from typing import Dict, List, Any
 from datetime import datetime
 import logging
+from fuzzywuzzy import fuzz
 
 # 로깅 설정
 logging.basicConfig(
@@ -34,18 +35,90 @@ class GovernmentStandardNormalizer:
 
     @staticmethod
     def _normalize_for_matching(value: str):
-        """매칭용 텍스트 정규화 - 괄호, 공백, 특수문자 모두 제거"""
+        """
+        매칭용 텍스트 정규화 - 개선 버전 (정보 손실 최소화)
+        - 특수문자 통일
+        - 괄호 내용은 제거하지 않고 공백으로 변환 (정보 보존)
+        - 공백을 완전히 제거 (매칭 정확도 향상)
+        - 접미사는 제거하지 않음 (정보 보존)
+        """
         if not value:
             return ""
-        # 1. 모든 괄호와 내용 제거
-        text = re.sub(r'[\(\)\[\]\{\}<>「」『』]', '', value)
-        # 2. 모든 특수문자 제거 (가운뎃점, 중점, 하이픈, 슬래시 등)
-        text = re.sub(r'[‧·∙・\-_/\\\,\.]', '', text)
-        # 3. 모든 공백 제거
-        text = re.sub(r'\s+', '', text)
-        # 4. 대소문자 통일
-        text = text.upper()
+
+        # 1. 특수문자를 공백으로 통일 (∙, ·, ・, /, -, 등)
+        text = value.replace('∙', ' ').replace('·', ' ').replace('・', ' ')
+        text = text.replace('/', ' ').replace('-', ' ')
+
+        # 2. 괄호는 제거하지 않고 공백으로 변환 (내용 보존)
+        # 예: "바이오의료(R&D)" → "바이오의료 R&D"
+        text = text.replace('(', ' ').replace(')', ' ')
+        text = text.replace('[', ' ').replace(']', ' ')
+        text = text.replace('{', ' ').replace('}', ' ')
+        text = text.replace('「', ' ').replace('」', ' ')
+        text = text.replace('『', ' ').replace('』', ' ')
+
+        # 3. 따옴표와 기타 특수문자 제거
+        text = text.replace('"', '').replace("'", '').replace('`', '')
+        text = text.replace('‧', '').replace('·', '').replace('∙', '')
+
+        # 4.  공백을 완전히 제거 (띄어쓰기 차이로 인한 매칭 실패 방지)
+        # "바이오 의료" vs "바이오의료" → 둘 다 "바이오의료"로 통일
+        text = text.replace(' ', '')
+
+        # 5. 접미사는 제거하지 않음 (원본 정보 보존)
+        # 기존에 접미사를 제거하면서 정보가 손실되었던 문제 해결
+
         return text
+
+    def _find_best_match(self, year, biz_name, detail_biz_name, threshold=85):
+        """
+        스마트 매칭 - (YEAR, BIZ_NM, DETAIL_BIZ_NM) 둘 다 일치해야 매칭
+
+        ⭐ 핵심 개선: 원본 텍스트 그대로 비교 (정규화 최소화)
+
+        Returns:
+            (plan_id, score, reason) 또는 (None, 0, None)
+        """
+        if not biz_name or not detail_biz_name:
+            return (None, 0, None)
+
+        # 1. 완전 일치 확인 (원본 텍스트 그대로)
+        for (db_year, db_biz, db_detail), plan_id in self.existing_plan_data.items():
+            if db_year != year:
+                continue
+
+            # 원본 그대로 비교 (대소문자 무시, 공백 trim)
+            if (db_biz.strip() == biz_name.strip() and
+                db_detail.strip() == detail_biz_name.strip()):
+                return (plan_id, 100, "완전일치")
+
+        # 2. 유사도 기반 매칭 - 원본 텍스트로 퍼지 매칭
+        best_score = 0
+        best_plan_id = None
+        best_reason = None
+
+        for (db_year, db_biz, db_detail), plan_id in self.existing_plan_data.items():
+            if db_year != year:
+                continue
+
+            # ⭐ 핵심: 원본 텍스트를 그대로 fuzz 비교
+            biz_similarity = fuzz.token_sort_ratio(biz_name, db_biz)
+            detail_similarity = fuzz.token_sort_ratio(detail_biz_name, db_detail)
+
+            # 둘 다 threshold 이상이어야 매칭 고려
+            if biz_similarity < threshold or detail_similarity < threshold:
+                continue
+
+            # 종합 점수: BIZ(50%) + DETAIL(50%)
+            combined_score = int((biz_similarity + detail_similarity) / 2)
+
+            if combined_score > best_score:
+                best_score = combined_score
+                best_plan_id = plan_id
+                best_reason = f"BIZ({biz_similarity})+DETAIL({detail_similarity})={combined_score}"
+
+        return (best_plan_id, best_score, best_reason)
+
 
     def __init__(self, json_path: str, output_dir: str, db_manager=None):
         self.json_path = Path(json_path)
@@ -62,7 +135,7 @@ class GovernmentStandardNormalizer:
         if year_match:
             document_year = int(year_match.group(1))
 
-        logger.info(f"📅 문서 연도 추출: {filename} -> {document_year}년")
+        logger.info(f" 문서 연도 추출: {filename} -> {document_year}년")
 
         # ID 카운터 (Oracle DB 형식: 년도 + 일련번호)
         self.id_counters = {
@@ -118,7 +191,7 @@ class GovernmentStandardNormalizer:
 
     def _load_existing_plan_data(self):
         """기존 PLAN_DATA를 DB에서 로드 (캐시용)"""
-        logger.info("🔄 기존 PLAN_DATA 로드 중...")
+        logger.info("[LOAD] 기존 PLAN_DATA 로드 중...")
         try:
             cursor = self.db_manager.connection.cursor()
             query = """
@@ -127,20 +200,25 @@ class GovernmentStandardNormalizer:
                 WHERE DELETE_YN = 'N'
             """
             cursor.execute(query)
+
+            count = 0
             for plan_id, year, biz_nm, detail_biz_nm in cursor:
-                # ✅ 매칭용 정규화 적용 (괄호, 공백, 특수문자 모두 제거)
-                biz_nm_normalized = self._normalize_for_matching(biz_nm) if biz_nm else ""
-                detail_biz_nm_normalized = self._normalize_for_matching(detail_biz_nm) if detail_biz_nm else ""
-                key = (year, biz_nm_normalized, detail_biz_nm_normalized)
+                count += 1
+                # ⭐ 원본 그대로 저장 (trim만 적용)
+                biz_nm_clean = biz_nm.strip() if biz_nm else ""
+                detail_biz_nm_clean = detail_biz_nm.strip() if detail_biz_nm else ""
+
+                key = (year, biz_nm_clean, detail_biz_nm_clean)
                 self.existing_plan_data[key] = plan_id.strip() if plan_id else None
-                # 디버깅: 처음 5개 출력
-                if len(self.existing_plan_data) <= 5:
-                    logger.info(f"   DB 키: ({year}, '{biz_nm[:30]}...', '{detail_biz_nm[:30]}...') -> {plan_id}")
+
+                # 디버깅: 2021년 데이터 처음 10개 출력
+                if year == 2021 and count <= 10:
+                    logger.info(f"   [{plan_id}] BIZ='{biz_nm_clean}' / DETAIL='{detail_biz_nm_clean}'")
 
             cursor.close()
-            logger.info(f"✅ 기존 PLAN_DATA 로드 완료: {len(self.existing_plan_data)}건")
+            logger.info(f"[OK] 기존 PLAN_DATA 로드 완료: {len(self.existing_plan_data)}건")
         except Exception as e:
-            logger.warning(f"⚠️ 기존 PLAN_DATA 로드 실패: {e}")
+            logger.warning(f"[WARN] 기존 PLAN_DATA 로드 실패: {e}")
 
     def _get_next_id(self, entity_type: str) -> int:
         """ID 생성"""
@@ -173,7 +251,7 @@ class GovernmentStandardNormalizer:
         if not self.current_context.get('sub_project_id'):
             return []
 
-        # ✅ PLAN_ID를 가져오되, 없으면 빈 문자열
+        #  PLAN_ID를 가져오되, 없으면 빈 문자열
         plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
 
         # "① 대표성과" 섹션 찾기
@@ -207,7 +285,7 @@ class GovernmentStandardNormalizer:
         - CUR_RESPRC, CUR_RESPRC_GOV, CUR_RESPRC_CIV (당해연도 연구비)
         - PERFORM_PRC, PLAN_PRC (실적/계획 비용)
         """
-        logger.info("📊 TB_PLAN_DATA 집계 필드 계산 중...")
+        logger.info("� TB_PLAN_DATA 집계 필드 계산 중...")
 
         for plan_data in self.data['plan_data']:
             plan_id = plan_data['PLAN_ID']
@@ -279,7 +357,7 @@ class GovernmentStandardNormalizer:
                 if end_dates:
                     plan_data['BIZ_EDT'] = max(end_dates)
 
-        logger.info("✅ TB_PLAN_DATA 집계 완료")
+        logger.info(" TB_PLAN_DATA 집계 완료")
 
     def _extract_plan_details(self, full_text: str, page_number: int) -> List[Dict]:
         """주요 추진계획 내용 추출"""
@@ -341,7 +419,7 @@ class GovernmentStandardNormalizer:
                         # 불릿 포인트나 숫자로 시작하는 항목
                         if re.match(r'^[•\-\d).]\s*', item):
                             normalized.append({
-                                'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                                'PLAN_ID': plan_id,  #  매칭된 PLAN_ID 사용
                                 'PERFORMANCE_YEAR': year,
                                 'PERFORMANCE_TYPE': '정성적실적',
                                 'CATEGORY': '추진실적',
@@ -361,13 +439,13 @@ class GovernmentStandardNormalizer:
         if not self.current_context.get('sub_project_id'):
             return []
 
-        # ✅ PLAN_ID 가져오기
+        #  PLAN_ID 가져오기
         plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
 
         if not period or not task or period in ['구분', '추진일정', '추진사항', '항목', '주요내용']:
             return []
 
-        # ✅ task와 detail을 합쳐서 전체 텍스트로 처리
+        #  task와 detail을 합쳐서 전체 텍스트로 처리
         full_task_text = f"{task}\n{detail}" if detail else task
 
         # task를 개별 항목으로 분리
@@ -385,7 +463,7 @@ class GovernmentStandardNormalizer:
             month_end = quarter * 3
             return f"{year}-{month_end:02d}-{[31,30,30,31][quarter-1]:02d}"
 
-        # ✅ 세부일정 텍스트에서 실제 날짜 추출
+        #  세부일정 텍스트에서 실제 날짜 추출
         def extract_month_range_from_detail(text):
             """
             세부일정에서 실제 날짜 추출:
@@ -456,7 +534,7 @@ class GovernmentStandardNormalizer:
                 first_line = task_item.split('\n')[0].replace('•', '').strip()
                 task_category = first_line
 
-            # ✅ 1순위: 세부일정에서 실제 날짜 추출
+            #  1순위: 세부일정에서 실제 날짜 추출
             month_info = extract_month_range_from_detail(task_item)
 
             if month_info:
@@ -465,7 +543,7 @@ class GovernmentStandardNormalizer:
                 last_day = calendar.monthrange(parsed_year, end_month)[1]
 
                 record = {
-                    'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                    'PLAN_ID': plan_id,  #  매칭된 PLAN_ID 사용
                     'SCHEDULE_YEAR': parsed_year,
                     'QUARTER': f"{start_month}월~{end_month}월",
                     'TASK_NAME': task_category[:768] if task_category else None,
@@ -475,13 +553,13 @@ class GovernmentStandardNormalizer:
                 }
                 normalized.append(record)
             else:
-                # ✅ 2순위: period의 분기로 대체
+                #  2순위: period의 분기로 대체
                 quarters = extract_quarters(period)
 
                 if quarters:
                     for quarter in quarters:
                         record = {
-                            'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                            'PLAN_ID': plan_id,  #  매칭된 PLAN_ID 사용
                             'SCHEDULE_YEAR': year,
                             'QUARTER': f"{quarter}/4분기",
                             'TASK_NAME': task_category[:768] if task_category else None,
@@ -492,7 +570,7 @@ class GovernmentStandardNormalizer:
                         normalized.append(record)
                 else:
                     record = {
-                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                        'PLAN_ID': plan_id,  #  매칭된 PLAN_ID 사용
                         'SCHEDULE_YEAR': year,
                         'QUARTER': '연중',
                         'TASK_NAME': task_category[:768] if task_category else None,
@@ -515,7 +593,7 @@ class GovernmentStandardNormalizer:
         if not self.current_context.get('sub_project_id'):
             return []
 
-        # ✅ PLAN_ID 가져오기
+        #  PLAN_ID 가져오기
         plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
 
         # 테이블 타입 감지
@@ -535,7 +613,7 @@ class GovernmentStandardNormalizer:
                                 val = float(val_str)
                                 if val > 0:
                                     normalized.append({
-                                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                                        'PLAN_ID': plan_id,  #  매칭된 PLAN_ID 사용
                                         'PERFORMANCE_YEAR': year,
                                         'PERFORMANCE_TYPE': '특허',
                                         'CATEGORY': indicator_type,
@@ -554,7 +632,7 @@ class GovernmentStandardNormalizer:
                                 val = float(val_str)
                                 if val > 0:
                                     normalized.append({
-                                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                                        'PLAN_ID': plan_id,  #  매칭된 PLAN_ID 사용
                                         'PERFORMANCE_YEAR': year,
                                         'PERFORMANCE_TYPE': '논문',
                                         'CATEGORY': indicator_type,
@@ -578,7 +656,7 @@ class GovernmentStandardNormalizer:
                                 val = float(val_str)
                                 if val > 0:
                                     normalized.append({
-                                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                                        'PLAN_ID': plan_id,  #  매칭된 PLAN_ID 사용
                                         'PERFORMANCE_YEAR': year,
                                         'PERFORMANCE_TYPE': '기술이전',
                                         'CATEGORY': category,
@@ -602,7 +680,7 @@ class GovernmentStandardNormalizer:
                                 val = float(val_str)
                                 if val > 0:
                                     normalized.append({
-                                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                                        'PLAN_ID': plan_id,  #  매칭된 PLAN_ID 사용
                                         'PERFORMANCE_YEAR': year,
                                         'PERFORMANCE_TYPE': '국제협력',
                                         'CATEGORY': category,
@@ -626,7 +704,7 @@ class GovernmentStandardNormalizer:
                                 val = float(val_str)
                                 if val > 0:
                                     normalized.append({
-                                        'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                                        'PLAN_ID': plan_id,  #  매칭된 PLAN_ID 사용
                                         'PERFORMANCE_YEAR': year,
                                         'PERFORMANCE_TYPE': '인력양성',
                                         'CATEGORY': category,
@@ -648,7 +726,7 @@ class GovernmentStandardNormalizer:
         if not self.current_context.get('sub_project_id'):
             return []
 
-        # ✅ PLAN_ID를 가져오되, 없으면 빈 문자열 (나중에 매칭)
+        #  PLAN_ID를 가져오되, 없으면 빈 문자열 (나중에 매칭)
         plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'], '')
 
         # 1단계: 연도 컬럼 파싱
@@ -738,7 +816,7 @@ class GovernmentStandardNormalizer:
             total = amounts['gov'] + amounts['private'] + amounts['local'] + amounts['etc']
 
             record = {
-                'PLAN_ID': plan_id,  # ✅ 매칭된 PLAN_ID 사용
+                'PLAN_ID': plan_id,  #  매칭된 PLAN_ID 사용
                 'BUDGET_YEAR': year,
                 'CATEGORY': category,
                 'TOTAL_AMOUNT': total if total > 0 else None,
@@ -759,7 +837,7 @@ class GovernmentStandardNormalizer:
         if not self.current_context.get('sub_project_id'):
             return
 
-        # ✅ PLAN_ID를 가져오되, 없으면 None (업데이트 불가)
+        #  PLAN_ID를 가져오되, 없으면 None (업데이트 불가)
         plan_id = self.plan_id_mapping.get(self.current_context['sub_project_id'])
         if not plan_id:
             # 빈 문자열이나 TEMP_로 시작하면 진행 (나중에 매칭)
@@ -888,7 +966,7 @@ class GovernmentStandardNormalizer:
         # TB_PLAN_DATA 레코드 찾아서 업데이트
         for plan_data in self.data['plan_data']:
             if plan_data['PLAN_ID'] == plan_id:
-                # ✅ 부처명 (NATION_ORGAN_NM) - 필수 필드!
+                #  부처명 (NATION_ORGAN_NM) - 필수 필드!
                 nation_organ = get_value_with_alternatives(
                     overview_data,
                     '부처명', '소관부처', '소관', '부처',
@@ -911,15 +989,15 @@ class GovernmentStandardNormalizer:
                 if nation_organ:
                     plan_data['NATION_ORGAN_NM'] = self._clean_text(nation_organ, 768)
                 else:
-                    logger.warning(f"⚠️ 부처명 미추출: {plan_data.get('BIZ_NM', 'unknown')}")
+                    logger.warning(f" 부처명 미추출: {plan_data.get('BIZ_NM', 'unknown')}")
                     plan_data['NATION_ORGAN_NM'] = "미분류"
 
-                # ✅ DETAIL_BIZ_NM: 세부사업명 (overview 테이블의 "세부사업명")
+                #  DETAIL_BIZ_NM: 세부사업명 (overview 테이블의 "세부사업명")
                 detail_biz_nm = get_value_with_alternatives(overview_data, '세부사업명', '사업명', '사업이름')
                 if detail_biz_nm:
                     plan_data['DETAIL_BIZ_NM'] = self._clean_text(detail_biz_nm, 768)
 
-                # ✅ BIZ_NM: 내역사업명 (overview 테이블의 "내역사업명")
+                #  BIZ_NM: 내역사업명 (overview 테이블의 "내역사업명")
                 biz_nm = get_value_with_alternatives(overview_data, '내역사업명')
                 if biz_nm:
                     plan_data['BIZ_NM'] = self._clean_text(biz_nm, 768)
@@ -968,18 +1046,18 @@ class GovernmentStandardNormalizer:
 
                 # 디버그 로그 (처음 3개 사업만)
                 if plan_data['NUM'] <= 3:
-                    logger.debug(f"📋 PLAN_ID {plan_id} overview 업데이트:")
-                    logger.debug(f"  - BIZ_TYPE: {'✅' if plan_data['BIZ_TYPE'] else '❌'}")
-                    logger.debug(f"  - LEAD_ORGAN_NM: {'✅' if plan_data['LEAD_ORGAN_NM'] else '❌'}")
-                    logger.debug(f"  - LAST_GOAL: {'✅' if plan_data['LAST_GOAL'] else '❌'} ({len(objective) if objective else 0}자)")
-                    logger.debug(f"  - BIZ_CONTENTS: {'✅' if plan_data['BIZ_CONTENTS'] else '❌'} ({len(content) if content else 0}자)")
+                    logger.debug(f"� PLAN_ID {plan_id} overview 업데이트:")
+                    logger.debug(f"  - BIZ_TYPE: {'' if plan_data['BIZ_TYPE'] else ''}")
+                    logger.debug(f"  - LEAD_ORGAN_NM: {'' if plan_data['LEAD_ORGAN_NM'] else ''}")
+                    logger.debug(f"  - LAST_GOAL: {'' if plan_data['LAST_GOAL'] else ''} ({len(objective) if objective else 0}자)")
+                    logger.debug(f"  - BIZ_CONTENTS: {'' if plan_data['BIZ_CONTENTS'] else ''} ({len(content) if content else 0}자)")
 
                 break
 
     def _process_sub_project(self, text: str, tables: List[Dict]) -> bool:
         """내역사업 처리 - TB_PLAN_DATA 생성"""
-        biz_name = None         # 내역사업명 → BIZ_NM
-        detail_biz_name = None  # 세부사업명 → DETAIL_BIZ_NM
+        biz_name = None         # 세부사업명 → BIZ_NM (DB 구조에 맞게)
+        detail_biz_name = None  # 내역사업명 → DETAIL_BIZ_NM (DB 구조에 맞게)
 
         # 테이블에서 찾기
         for table in tables:
@@ -991,72 +1069,74 @@ class GovernmentStandardNormalizer:
                 key = str(row[0]).strip()
                 value = str(row[1]).strip()
 
-                if '내역사업명' in key and value:
-                    biz_name = value         # 내역사업명 → BIZ_NM
-                elif '세부사업명' in key and value:  # ✅ value 체크 추가
-                    detail_biz_name = value  # 세부사업명 → DETAIL_BIZ_NM
+                if '세부사업명' in key and value:
+                    biz_name = value         # 세부사업명 → BIZ_NM
+                elif '내역사업명' in key and value:
+                    detail_biz_name = value  # 내역사업명 → DETAIL_BIZ_NM
+                elif '사업명' in key and value and '세부' not in key and '내역' not in key:
+                    # "사업명"만 있으면 BIZ_NM으로 사용 (세부사업명이 없을 때 대체)
+                    if not biz_name:
+                        biz_name = value
 
         # 텍스트에서 찾기 (테이블에서 못 찾았을 경우)
         if not biz_name:
-            match = re.search(r'내역사업명\s+([^\n]+)', text)
+            match = re.search(r'세부사업명\s+([^\n]+)', text)
             if match:
                 biz_name = match.group(1).strip()
 
         if not detail_biz_name:
-            match = re.search(r'세부사업명\s+([^\n]+)', text)
+            match = re.search(r'내역사업명\s+([^\n]+)', text)
             if match:
                 detail_biz_name = match.group(1).strip()
 
         if not biz_name:
             return False
 
-        # ✅ DETAIL_BIZ_NM이 없으면 BIZ_NM을 기본값으로 사용
+        #  DETAIL_BIZ_NM이 없으면 BIZ_NM을 기본값으로 사용
         if not detail_biz_name:
             detail_biz_name = biz_name
-            logger.debug(f"  📌 DETAIL_BIZ_NM 없음 → BIZ_NM 사용: {biz_name}")
+            logger.debug(f"   DETAIL_BIZ_NM 없음 → BIZ_NM 사용: {biz_name}")
 
-        # 이미 등록된 내역사업인지 체크 (DETAIL_BIZ_NM = 내역사업명)
+        # 이미 등록된 내역사업인지 체크 (BIZ_NM + DETAIL_BIZ_NM 조합으로 정확히 매칭)
         for plan_data in self.data['plan_data']:
-            if plan_data['DETAIL_BIZ_NM'] == detail_biz_name:  # ✅ detail_biz_name은 내역사업명
+            # BIZ_NM과 DETAIL_BIZ_NM 둘 다 일치해야 재사용
+            if (plan_data.get('BIZ_NM') == biz_name and
+                plan_data.get('DETAIL_BIZ_NM') == detail_biz_name):
                 self.current_context['sub_project_id'] = plan_data['_internal_id']
-                logger.info(f"📌 기존 내역사업 재사용: {detail_biz_name} (PLAN_ID: {plan_data['PLAN_ID']})")
+                logger.info(f"[REUSE] 기존 내역사업 재사용: {biz_name} / {detail_biz_name} (PLAN_ID: {plan_data['PLAN_ID']})")
                 return True
 
-        # ✅ 기존 Oracle DB에서 PLAN_ID 조회 (캐시에서)
-        existing_plan_id = None
+        #  스마트 매칭으로 기존 Oracle DB에서 PLAN_ID 조회
         year = self.current_context['document_year']
 
-        # ✅ 매칭용 정규화 적용 (괄호, 공백, 특수문자 모두 제거)
-        biz_nm_normalized = self._normalize_for_matching(biz_name) if biz_name else ""
-        detail_biz_nm_normalized = self._normalize_for_matching(detail_biz_name) if detail_biz_name else ""
+        logger.info(f"[MATCH] 매칭 시도: YEAR={year}, BIZ_NM='{biz_name}', DETAIL_BIZ_NM='{detail_biz_name}'")
 
-        # 캐시에서 매칭 시도 (YEAR, BIZ_NM, DETAIL_BIZ_NM)
-        key = (year, biz_nm_normalized, detail_biz_nm_normalized)
-        logger.info(f"🔍 매칭 시도: YEAR={year}, BIZ_NM='{biz_name}', DETAIL_BIZ_NM='{detail_biz_name}'")
-        logger.debug(f"   정규화된 키: ({year}, '{biz_nm_normalized}', '{detail_biz_nm_normalized}')")
-        existing_plan_id = self.existing_plan_data.get(key)
+        # 스마트 매칭 수행 (원본 텍스트 그대로 사용)
+        existing_plan_id, match_score, match_reason = self._find_best_match(year, biz_name, detail_biz_name)
 
         if existing_plan_id:
-            logger.info(f"✅ 기존 DB에서 PLAN_ID 발견: {biz_name} -> {existing_plan_id}")
+            if match_score == 100:
+                logger.info(f"[OK] 완전 일치: {detail_biz_name} -> {existing_plan_id}")
+            else:
+                logger.info(f"[PARTIAL] 부분 일치 ({match_score}점, {match_reason}): {detail_biz_name} -> {existing_plan_id}")
         else:
-            logger.warning(f"❌ 매칭 실패 - BIZ_NM: '{biz_name}', DETAIL_BIZ_NM: '{detail_biz_name}'")
+            logger.warning(f"[FAIL] 매칭 실패 - BIZ_NM: '{biz_name}', DETAIL_BIZ_NM: '{detail_biz_name}'")
 
         # 새로운 내역사업 생성
         sub_id = self._get_next_id('sub_project')
 
         # PLAN_ID 결정
         if existing_plan_id:
-            # 기존 DB에 있으면 해당 PLAN_ID 사용
+            # ✅ DB에서 매칭 성공 → 기존 PLAN_ID 그대로 사용
             plan_id = existing_plan_id
-            logger.info(f"🔍 기존 PLAN_ID 사용: {plan_id}")
+            logger.info(f"[USE] 기존 PLAN_ID 사용: {plan_id}")
         else:
-            # 매칭 실패 시 임시 PLAN_ID 생성: TEMP_년도_일련번호
-            # 나중에 load_oracle_direct에서 이를 감지하고 실제 매칭 수행
-            plan_id = f"TEMP_{year}_{str(sub_id).zfill(3)}"
-            logger.warning(f"⚠️ 신규 내역사업 (임시 PLAN_ID 생성): {plan_id}")
+            # ❌ DB에서 매칭 실패 → 임시 PLAN_ID 부여
+            plan_id = f"TEMP_{year}_{str(sub_id).zfill(4)}"
+            logger.warning(f"[TEMP] 임시 PLAN_ID 생성: {plan_id}")
 
         # TB_PLAN_DATA 레코드 생성 (회사 기존 43개 컬럼)
-        # ✅ 페이지 텍스트에서 부처명(NATION_ORGAN_NM) 추출
+        #  페이지 텍스트에서 부처명(NATION_ORGAN_NM) 추출
         nation_organ = None
         bracket_match = re.search(r'『\s*([^』]+)\s*』', text)
         if bracket_match:
@@ -1104,23 +1184,23 @@ class GovernmentStandardNormalizer:
         self.current_context['sub_project_id'] = sub_id
         self.plan_id_mapping[sub_id] = plan_id  # 매핑 저장
 
-        logger.info(f"✅ 내역사업 등록: {detail_biz_name} (ID: {sub_id}, PLAN_ID: {plan_id})")
+        logger.info(f"[NEW] 내역사업 등록: {detail_biz_name} (ID: {sub_id}, PLAN_ID: {plan_id})")
         return True
 
 
     def normalize(self, json_data: Dict) -> bool:
         """JSON 데이터 정규화 (전체 처리)"""
         try:
-            logger.info(f"🚀 정부 표준 정규화 시작")
+            logger.info(f"[START] 정부 표준 정규화 시작")
 
-            # ✅ 메타데이터에서 문서 연도 추출 (우선순위 1)
+            #  메타데이터에서 문서 연도 추출 (우선순위 1)
             metadata = json_data.get('metadata', {})
             if metadata and 'document_year' in metadata:
                 self.current_context['document_year'] = metadata['document_year']
-                logger.info(f"📅 JSON metadata에서 연도 추출: {metadata['document_year']}년")
-            # ✅ JSON 파일명에서 추출한 연도 유지 (우선순위 2)
+                logger.info(f"[YEAR] JSON metadata에서 연도 추출: {metadata['document_year']}년")
+            #  JSON 파일명에서 추출한 연도 유지 (우선순위 2)
             else:
-                logger.info(f"📅 파일명에서 연도 사용: {self.current_context['document_year']}년")
+                logger.info(f"[YEAR] 파일명에서 연도 사용: {self.current_context['document_year']}년")
 
             self.current_context['performance_year'] = self.current_context['document_year'] - 1
             self.current_context['plan_year'] = self.current_context['document_year']
@@ -1152,7 +1232,7 @@ class GovernmentStandardNormalizer:
                         # 기존 프로젝트로 전환
                         if self.current_context.get('sub_project_id') != existing_project['_internal_id']:
                             self.current_context['sub_project_id'] = existing_project['_internal_id']
-                            logger.info(f"📌 내역사업 전환: {page_sub_project} (PLAN_ID: {existing_project['PLAN_ID']})")
+                            logger.info(f"[SWITCH] 내역사업 전환: {page_sub_project} (PLAN_ID: {existing_project['PLAN_ID']})")
                     else:
                         # 새로운 내역사업 처리
                         self._process_sub_project(page_full_text, page_tables)
@@ -1163,7 +1243,7 @@ class GovernmentStandardNormalizer:
 
                 # sub_project_id가 여전히 없으면 경고 후 건너뛰기
                 if not self.current_context.get('sub_project_id'):
-                    logger.debug(f"⚠️ 페이지 {page_num}: sub_project_id 없음, 건너뜀")
+                    logger.debug(f" 페이지 {page_num}: sub_project_id 없음, 건너뜀")
                     continue
 
                 # 원본 데이터 저장
@@ -1255,8 +1335,8 @@ class GovernmentStandardNormalizer:
 
                         self.validation_stats['processed_tables'] += 1
 
-            # ✅ 최종 단계: "미분류" NATION_ORGAN_NM 재검색
-            logger.info("🔍 미분류 부처명 재검색 중...")
+            #  최종 단계: "미분류" NATION_ORGAN_NM 재검색
+            logger.info(" 미분류 부처명 재검색 중...")
             for plan_data in self.data['plan_data']:
                 if plan_data['NATION_ORGAN_NM'] == "미분류":
                     # 해당 내역사업의 모든 페이지에서 『』 패턴 찾기
@@ -1271,10 +1351,10 @@ class GovernmentStandardNormalizer:
                             if bracket_match:
                                 nation_organ = bracket_match.group(1).strip()
                                 plan_data['NATION_ORGAN_NM'] = self._clean_text(nation_organ, 768)
-                                logger.info(f"✅ 부처명 발견: {sub_project_name} -> {nation_organ}")
+                                logger.info(f" 부처명 발견: {sub_project_name} -> {nation_organ}")
                                 break
 
-            logger.info(f"✅ 정규화 완료: {len(self.data['plan_data'])}개 내역사업")
+            logger.info(f" 정규화 완료: {len(self.data['plan_data'])}개 내역사업")
             return True
 
         except Exception as e:
@@ -1286,7 +1366,7 @@ class GovernmentStandardNormalizer:
     def save_to_csv(self):
         """CSV 저장 - TB_PLAN_DATA 기반 스키마"""
 
-        # ✅ 1단계: 하위 테이블에 PLAN_ID 채우기 (plan_id_mapping 사용)
+        #  1단계: 하위 테이블에 PLAN_ID 채우기 (plan_id_mapping 사용)
         for budget in self.data['budgets']:
             if not budget.get('PLAN_ID') or budget['PLAN_ID'] == '':
                 # _internal_id를 통해 PLAN_ID 찾기 (이미 정규화 단계에서 채워짐)
@@ -1305,7 +1385,7 @@ class GovernmentStandardNormalizer:
             if not achievement.get('PLAN_ID') or achievement['PLAN_ID'] == '':
                 pass  # 이미 정규화 단계에서 채워져 있어야 함
 
-        # ✅ 2단계: TB_PLAN_DATA 집계 필드 계산
+        #  2단계: TB_PLAN_DATA 집계 필드 계산
         self._aggregate_plan_data_fields()
 
 
@@ -1322,57 +1402,57 @@ class GovernmentStandardNormalizer:
                     row = {k: v for k, v in record.items()
                           if k != '_internal_id'}
                     writer.writerow(row)
-            logger.info(f"✅ TB_PLAN_DATA.csv 저장 ({len(self.data['plan_data'])}건)")
+            logger.info(f" TB_PLAN_DATA.csv 저장 ({len(self.data['plan_data'])}건)")
 
         # TB_PLAN_BUDGET
         if self.data['budgets']:
             csv_path = self.output_dir / "TB_PLAN_BUDGET.csv"
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                # ✅ PLAN_ID를 첫 번째 컬럼으로
+                #  PLAN_ID를 첫 번째 컬럼으로
                 fieldnames = ['PLAN_ID', 'BUDGET_YEAR', 'CATEGORY', 'TOTAL_AMOUNT',
                              'GOV_AMOUNT', 'PRIVATE_AMOUNT', 'LOCAL_AMOUNT', 'ETC_AMOUNT',
                              'PERFORM_PRC', 'PLAN_PRC']
                 writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
                 writer.writerows(self.data['budgets'])
-            logger.info(f"✅ TB_PLAN_BUDGET.csv 저장 ({len(self.data['budgets'])}건)")
+            logger.info(f" TB_PLAN_BUDGET.csv 저장 ({len(self.data['budgets'])}건)")
 
         # TB_PLAN_SCHEDULE
         if self.data['schedules']:
             csv_path = self.output_dir / "TB_PLAN_SCHEDULE.csv"
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                # ✅ PLAN_ID를 첫 번째 컬럼으로
+                #  PLAN_ID를 첫 번째 컬럼으로
                 fieldnames = ['PLAN_ID', 'SCHEDULE_YEAR', 'QUARTER', 'TASK_NAME',
                              'TASK_CONTENT', 'START_DATE', 'END_DATE']
                 writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
                 writer.writerows(self.data['schedules'])
-            logger.info(f"✅ TB_PLAN_SCHEDULE.csv 저장 ({len(self.data['schedules'])}건)")
+            logger.info(f" TB_PLAN_SCHEDULE.csv 저장 ({len(self.data['schedules'])}건)")
 
         # TB_PLAN_PERFORMANCE
         if self.data['performances']:
             csv_path = self.output_dir / "TB_PLAN_PERFORMANCE.csv"
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                # ✅ PLAN_ID를 첫 번째 컬럼으로
+                #  PLAN_ID를 첫 번째 컬럼으로
                 fieldnames = ['PLAN_ID', 'PERFORMANCE_YEAR', 'PERFORMANCE_TYPE', 'CATEGORY',
                              'INDICATOR_NAME', 'TARGET_VALUE', 'ACTUAL_VALUE', 'UNIT',
                              'ORIGINAL_TEXT', 'VALUE']
                 writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
                 writer.writerows(self.data['performances'])
-            logger.info(f"✅ TB_PLAN_PERFORMANCE.csv 저장 ({len(self.data['performances'])}건)")
+            logger.info(f" TB_PLAN_PERFORMANCE.csv 저장 ({len(self.data['performances'])}건)")
 
         # TB_PLAN_ACHIEVEMENTS
         if self.data['achievements']:
             csv_path = self.output_dir / "TB_PLAN_ACHIEVEMENTS.csv"
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                # ✅ PLAN_ID를 첫 번째 컬럼으로 명시적 순서 지정
+                #  PLAN_ID를 첫 번째 컬럼으로 명시적 순서 지정
                 fieldnames = ['PLAN_ID', 'ACHIEVEMENT_YEAR', 'ACHIEVEMENT_TYPE',
                              'TITLE', 'DESCRIPTION', 'PAGE_NUMBER']
                 writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
                 writer.writerows(self.data['achievements'])
-            logger.info(f"✅ TB_PLAN_ACHIEVEMENTS.csv 저장 ({len(self.data['achievements'])}건)")
+            logger.info(f" TB_PLAN_ACHIEVEMENTS.csv 저장 ({len(self.data['achievements'])}건)")
 
         # 원본 데이터 (감사용)
         if self.data['raw_data']:
@@ -1381,21 +1461,21 @@ class GovernmentStandardNormalizer:
                 writer = csv.DictWriter(f, fieldnames=self.data['raw_data'][0].keys())
                 writer.writeheader()
                 writer.writerows(self.data['raw_data'])
-            logger.info(f"✅ raw_data.csv 저장 ({len(self.data['raw_data'])}건)")
+            logger.info(f" raw_data.csv 저장 ({len(self.data['raw_data'])}건)")
 
     def print_statistics(self):
         """통계 출력"""
         print("\n" + "="*80)
-        print("📊 정부 표준 정규화 완료 (TB_PLAN_DATA + 하위 테이블)")
+        print("� 정부 표준 정규화 완료 (TB_PLAN_DATA + 하위 테이블)")
         print("="*80)
 
-        print(f"\n📁 내역사업 (TB_PLAN_DATA): {len(self.data['plan_data'])}개")
+        print(f"\n� 내역사업 (TB_PLAN_DATA): {len(self.data['plan_data'])}개")
         for plan_data in self.data['plan_data'][:10]:  # 처음 10개만 표시
             print(f"  - {plan_data['BIZ_NM']} (PLAN_ID: {plan_data['PLAN_ID']})")
         if len(self.data['plan_data']) > 10:
             print(f"  ... 외 {len(self.data['plan_data']) - 10}개")
 
-        print(f"\n📋 Oracle 테이블별 데이터 통계:")
+        print(f"\n� Oracle 테이블별 데이터 통계:")
         print(f"  TB_PLAN_DATA:        {len(self.data['plan_data'])}건")
         print(f"  TB_PLAN_BUDGET:      {len(self.data['budgets'])}건")
         print(f"  TB_PLAN_SCHEDULE:    {len(self.data['schedules'])}건")
@@ -1418,7 +1498,7 @@ if __name__ == "__main__":
     output_folder = sys.argv[2] if len(sys.argv) > 2 else "normalized_output_government"
 
     if not Path(json_file).exists():
-        print(f"❌ 파일을 찾을 수 없습니다: {json_file}")
+        print(f" 파일을 찾을 수 없습니다: {json_file}")
         sys.exit(1)
 
     normalizer = GovernmentStandardNormalizer(json_file, output_folder)
@@ -1431,7 +1511,7 @@ if __name__ == "__main__":
     if success:
         normalizer.save_to_csv()
         normalizer.print_statistics()
-        print(f"\n✅ 정규화 완료! CSV 저장 위치: {output_folder}/")
+        print(f"\n 정규화 완료! CSV 저장 위치: {output_folder}/")
     else:
-        print("❌ 정규화 실패!")
+        print(" 정규화 실패!")
         sys.exit(1)

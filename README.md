@@ -1,35 +1,35 @@
-# 생명공학육성시행계획 PDF → Oracle DB 처리 시스템
+# 🧬 생명공학육성시행계획 데이터 처리 시스템
 
-정부 생명공학육성시행계획 PDF 파일을 자동으로 파싱하여 Oracle 데이터베이스에 적재하는 시스템입니다.
+정부 생명공학육성시행계획 PDF 파일을 자동으로 파싱하여 정규화된 CSV를 생성하고 Oracle DB에 적재하는 통합 시스템입니다.
 
 ## 🎯 주요 기능
 
-### 1. PDF 자동 파싱
-- **pdfplumber** 기반 테이블 추출
+### 1. PDF → JSON 추출 (`extract_pdf_to_json.py`)
+- **pdfplumber** 기반 지능형 테이블 추출
 - 페이지별 내역사업 자동 구분
 - 3가지 카테고리 자동 분류 (overview, plan, performance)
+- JSON 형식으로 구조화 저장
 
-### 2. 정부 표준 정규화
-- **TB_PLAN_DATA**: 내역사업 메인 정보 (43개 컬럼)
-- **TB_PLAN_BUDGET**: 연도별 예산 상세 (실적/계획 구분)
-- **TB_PLAN_SCHEDULE**: 세부 일정
-- **TB_PLAN_PERFORMANCE**: 성과 상세 (특허, 논문, 인력양성)
-- **TB_PLAN_ACHIEVEMENTS**: 대표 성과
+### 2. 정부 표준 정규화 (`normalize_government_standard.py`)
+- **스마트 PLAN_ID 매칭** (YEAR + BIZ_NM + DETAIL_BIZ_NM)
+  - 완전 일치 → 부분 일치 (95점 이상) → 임시 ID 순차 적용
+- **5개 정규화 테이블 생성**:
+  - `TB_PLAN_DATA`: 내역사업 메인 (부처, 사업명, 예산 등)
+  - `TB_PLAN_BUDGET`: 연도별 예산 상세 (실적/계획)
+  - `TB_PLAN_SCHEDULE`: 세부 일정
+  - `TB_PLAN_PERFORMANCE`: 성과 상세 (특허, 논문, 인력)
+  - `raw_data`: 원본 데이터
+- **다년도 데이터 통합**: 2020~2024년 5개 파일 → 단일 CSV
 
-### 3. Oracle DB 자동 적재
-- **2개 DB 연결 구조**
-  - `BICS` (읽기): 기존 TB_PLAN_DATA 매칭용
-  - `BICS_DEV` (쓰기): 하위 테이블 적재용
-- **자동 PLAN_ID 매칭** (YEAR + BIZ_NM + DETAIL_BIZ_NM)
-- **TB_PLAN_DATA 자동 복사** (BICS → BICS_DEV)
-- **FK 제약조건 자동 처리**
-- **매칭 리포트 생성** (성공/실패/차이점)
+### 3. Oracle DB 자동 적재 (`oracle_db_manager.py`)
+- 정규화된 CSV → Oracle DB 자동 적재
+- FK 제약조건 자동 처리
+- 트랜잭션 롤백 지원
 
-### 4. Streamlit 웹 UI
-- 드래그 앤 드롭 파일 업로드
-- 실시간 처리 진행률 표시
-- CSV 데이터 미리보기 및 다운로드
-- DB 통계 대시보드
+### 4. 통합 실행 파이프라인
+- **전체 처리**: `run_normalize_all.py` - PDF 5개 → CSV 통합
+- **메인 파이프라인**: `main.py` - PDF → JSON → CSV → DB 전체 흐름
+- **Streamlit UI**: `streamlit_app.py` - 웹 기반 업로드 & 실행
 
 ## 📦 설치
 
@@ -43,82 +43,74 @@
 pip install -r requirements.txt
 ```
 
-### 3. Oracle Instant Client 설정
-Windows:
+### 3. 환경 설정
+`.env` 파일 생성 (`.env.example` 참고):
 ```bash
-# Oracle Instant Client 다운로드 및 압축 해제
-# 환경변수 설정
-set PATH=%PATH%;C:\oracle\instantclient_21_3
-```
-
-### 4. 데이터베이스 설정
-`config.py` 파일 수정:
-```python
-# BICS (읽기용) - 기존 TB_PLAN_DATA 매칭
-ORACLE_CONFIG = {
-    "host": "192.168.73.208",
-    "port": 1521,
-    "sid": "bics",
-    "user": "bics",
-    "password": "your_password",
-    "charset": "UTF8"
-}
-
-# BICS_DEV (쓰기용) - 하위 테이블 적재
-ORACLE_CONFIG_DEV = {
-    "host": "192.168.73.208",
-    "port": 1521,
-    "sid": "bics",
-    "user": "bics_dev",
-    "password": "bics_dev",
-    "charset": "UTF8"
-}
+# Oracle 데이터베이스 설정
+ORACLE_HOST=192.168.73.208
+ORACLE_PORT=1521
+ORACLE_SID=bics
+ORACLE_USER=bics
+ORACLE_PASSWORD=your_password
 ```
 
 ## 🚀 사용 방법
 
-### 1. 명령줄 실행
+### 방법 1: 통합 정규화 (권장) ✨
+```bash
+# input/ 폴더의 모든 JSON을 하나의 CSV로 통합
+python run_normalize_all.py
+```
+**출력**: `normalized_output_government/*.csv` (5개년 통합)
+
+### 방법 2: 전체 파이프라인 (PDF → JSON → CSV → DB)
 ```bash
 # 단일 파일 처리
 python main.py input/2024년도_생명공학육성시행계획.pdf
 
-# 전체 파이프라인 (input/ 폴더 내 모든 PDF)
+# 전체 파일 처리
 python main.py
-
-# DB 적재 건너뛰기
-python main.py --skip-db
 ```
 
-### 2. Streamlit 웹 UI 실행
+### 방법 3: Streamlit 웹 UI
 ```bash
 streamlit run streamlit_app.py
 ```
-
 브라우저에서 `http://localhost:8501` 접속
-
-#### 사용 단계:
-1. **PDF 업로드** 탭에서 파일 선택
-2. **전체 파이프라인 실행** 버튼 클릭
-3. **CSV 데이터** 탭에서 결과 확인
-4. **DB 통계** 탭에서 적재 결과 확인
+- PDF 업로드 → JSON 추출 → CSV 생성 → DB 적재 일괄 처리
+- 실시간 진행률 표시 및 결과 다운로드
 
 ## 📁 프로젝트 구조
 
 ```
 PythonProject/
-├── main.py                              # 메인 실행 파일
-├── streamlit_app.py                     # Streamlit 웹 UI
-├── config.py                            # 설정 파일
-├── extract_pdf_to_json.py               # PDF → JSON 변환
-├── normalize_government_standard.py     # JSON → CSV 정규화
-├── load_oracle_direct.py                # CSV → Oracle DB 적재
-├── oracle_db_manager.py                 # Oracle 연결 관리
-├── oracle_table_ddl.py                  # 테이블 DDL 정의
-├── requirements.txt                     # Python 패키지 목록
-├── README.md                            # 이 파일
+├── 📄 핵심 파일
+│   ├── config.py                          # 환경 설정
+│   ├── extract_pdf_to_json.py             # PDF → JSON 추출
+│   ├── normalize_government_standard.py   # JSON → CSV 정규화 (스마트 매칭)
+│   ├── oracle_db_manager.py               # Oracle DB 연결/적재
+│   ├── oracle_table_ddl.py                # DB 테이블 DDL
+│   │
+│   ├── run_normalize_all.py               # ⭐ 통합 실행 (5개 파일 → 1개 CSV)
+│   ├── main.py                            # 전체 파이프라인 (PDF→JSON→CSV→DB)
+│   └── streamlit_app.py                   # 웹 UI
 │
-├── input/                               # PDF 입력 폴더
-├── output/                              # JSON 출력 폴더
+├── 📂 데이터 폴더
+│   ├── input/                             # PDF 입력 (2020~2024년)
+│   ├── output/                            # JSON 출력
+│   └── normalized_output_government/      # CSV 정규화 결과
+│       ├── TB_PLAN_DATA.csv              # 내역사업 (1,558건)
+│       ├── TB_PLAN_BUDGET.csv            # 예산
+│       ├── TB_PLAN_SCHEDULE.csv          # 일정
+│       ├── TB_PLAN_PERFORMANCE.csv       # 성과
+│       └── raw_data.csv                  # 원본
+│
+└── 📋 기타
+    ├── requirements.txt                   # 패키지 목록
+    ├── README.md                          # 프로젝트 설명
+    ├── NORMALIZATION_STRATEGY.md          # 정규화 전략 문서
+    └── .env.example                       # 환경 설정 예시
+```
 └── normalized_output_government/        # CSV 출력 폴더
     ├── TB_PLAN_DATA.csv
     ├── TB_PLAN_BUDGET.csv
@@ -209,54 +201,82 @@ ACHIEVEMENT_ORDER   NUMBER
 DESCRIPTION         VARCHAR2(4000)
 ```
 
-## 🔍 매칭 로직
 
-### PLAN_ID 자동 매칭
-1. **키 생성**: `(YEAR, BIZ_NM, DETAIL_BIZ_NM)`
-2. **특수문자 정규화**: 가운뎃점(·, ∙, ･) 제거
-3. **기존 DB 조회**: BICS.TB_PLAN_DATA에서 검색
-4. **매칭 결과**:
-   - ✅ 성공: 기존 PLAN_ID 재사용
-   - ❌ 실패: 신규 레코드로 표시
+## 🔍 스마트 매칭 로직
 
-### 매칭 리포트
-- `matching_report.csv`: 전체 매칭 결과
-- `unmatched_records.csv`: 매칭 실패 목록
-- `diff_report.csv`: 차이점 발견 목록
+### PLAN_ID 자동 매칭 알고리즘
+1. **정규화 키 생성**: `(YEAR, 정규화된_BIZ_NM, 정규화된_DETAIL_BIZ_NM)`
+   - 공백/특수문자 제거
+   - 가운뎃점(·, ∙, ･, •) 통일
+   
+2. **매칭 전략** (순차 적용):
+   ```
+   ① 완전 일치 (BIZ ↔ BIZ, DETAIL ↔ DETAIL)
+   ② 교차 일치 (BIZ ↔ DETAIL, DETAIL ↔ BIZ)
+   ③ 부분 일치 (유사도 95점 이상)
+   ④ 임시 ID 생성 (TEMP_YEAR_XXX)
+   ```
 
-## ⚙️ 고급 설정
+3. **매칭 결과**:
+   - ✅ **성공**: 기존 PLAN_ID 재사용
+   - ⚠️ **부분 일치**: 유사도 점수와 함께 기록
+   - ❌ **실패**: 임시 ID 부여 (수동 검토 필요)
 
-### 병렬 처리
-`main.py`에서 워커 수 조정:
+### 매칭률
+- **2020~2023년 통합**: 1,558건 중 **1,555건 매칭 (99.8%)**
+- **임시 ID**: 3건 (0.2%)
+
+## 💡 주요 특징
+
+### ✨ 개선된 정규화 전략
+- **다년도 데이터 통합**: 5개 파일 → 단일 CSV 세트
+- **중복 제거**: 동일 PLAN_ID는 자동으로 병합
+- **부처명 자동 추출**: 정규표현식 기반 패턴 매칭
+- **집계 필드 자동 계산**: 총예산, 총성과 등
+
+### 🚀 성능 최적화
+- **배치 쿼리**: DB 조회 최소화
+- **메모리 효율**: 스트리밍 방식 CSV 쓰기
+- **로깅**: 상세한 진행 상황 추적
+
+## 🐛 문제 해결
+
+### Oracle 연결 오류
 ```bash
-python main.py --workers 8
-```
-
-### 배치 처리
-`batch_processor.py` 사용:
-```python
-from batch_processor import BatchPDFProcessor
-
-processor = BatchPDFProcessor(
-    input_dir="input/",
-    output_dir="output/",
-    max_workers=4
-)
-processor.process_all()
-```
-
-## 🐛 트러블슈팅
-
-### 1. Oracle 연결 실패
-```
 ORA-12541: TNS:no listener
 ```
-**해결**: Oracle 서버가 실행 중인지 확인
+**해결**: `.env` 파일의 DB 정보 확인 및 Oracle 서버 상태 점검
 
-### 2. FK 제약조건 위반
+### 매칭률이 낮은 경우
+```bash
+# 정규화 로그 확인
+grep "FAIL" normalized_output_government/normalize.log
+
+# 임시 ID 레코드 확인
+grep "TEMP_" normalized_output_government/TB_PLAN_DATA.csv
 ```
-ORA-02291: integrity constraint violated - parent key not found
+**해결**: DB의 기존 데이터와 JSON의 사업명 표기 차이 수동 매핑
+
+### PDF 파싱 실패
+```bash
+# JSON 구조 확인
+python -m json.tool output/2024년도_생명공학육성시행계획.json
 ```
+**해결**: PDF 테이블 구조 변경 시 `extract_pdf_to_json.py` 로직 수정
+
+## 📝 라이센스
+
+MIT License
+
+## 👥 기여
+
+이슈 및 풀 리퀘스트 환영합니다!
+
+---
+
+**마지막 업데이트**: 2025-11-24  
+**버전**: 2.0 (통합 정규화 지원)
+
 **해결**: 자동으로 TB_PLAN_DATA가 BICS_DEV로 복사됩니다. 수동 확인:
 ```sql
 SELECT COUNT(*) FROM BICS_DEV.TB_PLAN_DATA;

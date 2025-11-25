@@ -516,8 +516,8 @@ def main():
     parser.add_argument(
         '--workers',
         type=int,
-        default=4,
-        help='병렬 작업자 수 (기본값: 4)'
+        default=5,
+        help='병렬 작업자 수 (기본값: 5)'
     )
     
     args = parser.parse_args()
