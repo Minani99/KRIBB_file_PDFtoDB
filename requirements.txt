@@ -1,43 +1,29 @@
-# PDF to Database - 정부/공공기관 표준 시스템
-# Python 3.12+ required
+# PDF to Database - 생명공학육성시행계획 처리 시스템
+# Python 3.11+ required
 
-# Core Requirements
-# ================
+# ==================== Core Requirements ====================
 
 # Database
-pymysql==1.1.2
-oracledb>=3.4.0
+oracledb>=2.0.0  # Oracle DB 연결
 
 # Data Processing
-pandas==2.2.3
-numpy>=2.0.0
-
-# Visualization
-matplotlib==3.10.3
-seaborn==0.13.2
-
-# Date/Time
-python-dateutil==2.9.0
+pandas>=2.0.0
+numpy>=1.24.0
 
 # PDF Processing
-pdfplumber==0.10.3
-PyPDF2==3.0.1
+pdfplumber>=0.10.0  # PDF 테이블 추출
 
-# Batch Processing & Progress
-# ===========================
-tqdm==4.67.0  # 진행률 표시
+# Text Matching
+fuzzywuzzy>=0.18.0  # 유사도 매칭
+python-Levenshtein>=0.21.0  # fuzzywuzzy 성능 향상
 
-# Web UI (Optional)
-# =================
-streamlit==1.40.2  # 웹 인터페이스
-plotly==5.24.1  # 인터랙티브 차트
+# ==================== Web UI ====================
+streamlit>=1.30.0  # Streamlit 웹 인터페이스
 
-# Advanced PDF Processing (Optional)
-# ==================================
-# docling  # 고급 PDF 분석 (별도 설치 필요)
+# ==================== Optional ====================
 
-# Additional Tools
-# ================
-tabulate==0.9.0  # 테이블 출력
-python-dotenv==1.0.0  # 환경 변수 관리
-openpyxl==3.1.2  # Excel 파일 처리
+# Progress Bar
+tqdm>=4.65.0  # 진행률 표시 (선택)
+
+# Environment
+python-dotenv>=1.0.0  # 환경 변수 관리 (선택)

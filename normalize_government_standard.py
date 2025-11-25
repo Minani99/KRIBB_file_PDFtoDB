@@ -70,29 +70,64 @@ class GovernmentStandardNormalizer:
 
         return text
 
-    def _find_best_match(self, year, biz_name, detail_biz_name, threshold=85):
+    def _find_best_match(self, year, biz_name, detail_biz_name, threshold=80):
         """
-        스마트 매칭 - (YEAR, BIZ_NM, DETAIL_BIZ_NM) 둘 다 일치해야 매칭
-
-        ⭐ 핵심 개선: 원본 텍스트 그대로 비교 (정규화 최소화)
+        스마트 매칭 - 다단계 매칭 전략
+        
+        매칭 순서:
+        1. 완전 일치 (YEAR + BIZ_NM + DETAIL_BIZ_NM)
+        2. 정규화 후 완전 일치
+        3. BIZ_NM ↔ DETAIL_BIZ_NM 교차 매칭
+        4. 유사도 기반 매칭 (threshold 이상)
+        5. 단일 필드 높은 유사도 매칭
 
         Returns:
             (plan_id, score, reason) 또는 (None, 0, None)
         """
-        if not biz_name or not detail_biz_name:
+        if not biz_name and not detail_biz_name:
             return (None, 0, None)
+        
+        # 입력 정규화
+        biz_name = (biz_name or "").strip()
+        detail_biz_name = (detail_biz_name or "").strip()
+        norm_biz = self._normalize_for_matching(biz_name)
+        norm_detail = self._normalize_for_matching(detail_biz_name)
 
-        # 1. 완전 일치 확인 (원본 텍스트 그대로)
+        # 1단계: 완전 일치 (원본 텍스트)
         for (db_year, db_biz, db_detail), plan_id in self.existing_plan_data.items():
             if db_year != year:
                 continue
-
-            # 원본 그대로 비교 (대소문자 무시, 공백 trim)
-            if (db_biz.strip() == biz_name.strip() and
-                db_detail.strip() == detail_biz_name.strip()):
+            if db_biz.strip() == biz_name and db_detail.strip() == detail_biz_name:
                 return (plan_id, 100, "완전일치")
 
-        # 2. 유사도 기반 매칭 - 원본 텍스트로 퍼지 매칭
+        # 2단계: 정규화 후 완전 일치
+        for (db_year, db_biz, db_detail), plan_id in self.existing_plan_data.items():
+            if db_year != year:
+                continue
+            db_norm_biz = self._normalize_for_matching(db_biz)
+            db_norm_detail = self._normalize_for_matching(db_detail)
+            
+            if norm_biz == db_norm_biz and norm_detail == db_norm_detail:
+                return (plan_id, 99, "정규화일치")
+
+        # 3단계: 교차 매칭 (BIZ ↔ DETAIL 서로 바뀐 경우)
+        for (db_year, db_biz, db_detail), plan_id in self.existing_plan_data.items():
+            if db_year != year:
+                continue
+            db_norm_biz = self._normalize_for_matching(db_biz)
+            db_norm_detail = self._normalize_for_matching(db_detail)
+            
+            # BIZ와 DETAIL이 서로 바뀐 경우
+            if norm_biz == db_norm_detail and norm_detail == db_norm_biz:
+                return (plan_id, 98, "교차일치")
+            # DETAIL만 일치하는 경우 (BIZ가 비어있거나 다를 때)
+            if norm_detail == db_norm_detail and norm_detail:
+                return (plan_id, 95, "DETAIL일치")
+            # BIZ만 높은 일치 (DETAIL이 없거나 다를 때)
+            if norm_biz == db_norm_biz and norm_biz and not norm_detail:
+                return (plan_id, 93, "BIZ일치")
+
+        # 4단계: 유사도 기반 매칭 (fuzzywuzzy)
         best_score = 0
         best_plan_id = None
         best_reason = None
@@ -101,23 +136,39 @@ class GovernmentStandardNormalizer:
             if db_year != year:
                 continue
 
-            # ⭐ 핵심: 원본 텍스트를 그대로 fuzz 비교
-            biz_similarity = fuzz.token_sort_ratio(biz_name, db_biz)
-            detail_similarity = fuzz.token_sort_ratio(detail_biz_name, db_detail)
+            # 유사도 계산
+            biz_sim = fuzz.token_sort_ratio(biz_name, db_biz) if biz_name and db_biz else 0
+            detail_sim = fuzz.token_sort_ratio(detail_biz_name, db_detail) if detail_biz_name and db_detail else 0
+            
+            # 정규화 버전으로도 비교
+            db_norm_biz = self._normalize_for_matching(db_biz)
+            db_norm_detail = self._normalize_for_matching(db_detail)
+            norm_biz_sim = fuzz.ratio(norm_biz, db_norm_biz) if norm_biz and db_norm_biz else 0
+            norm_detail_sim = fuzz.ratio(norm_detail, db_norm_detail) if norm_detail and db_norm_detail else 0
+            
+            # 더 높은 점수 사용
+            biz_final = max(biz_sim, norm_biz_sim)
+            detail_final = max(detail_sim, norm_detail_sim)
 
-            # 둘 다 threshold 이상이어야 매칭 고려
-            if biz_similarity < threshold or detail_similarity < threshold:
-                continue
+            # 둘 다 threshold 이상이면 매칭
+            if biz_final >= threshold and detail_final >= threshold:
+                combined_score = int((biz_final + detail_final) / 2)
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_plan_id = plan_id
+                    best_reason = f"유사도(BIZ:{biz_final}+DETAIL:{detail_final})={combined_score}"
+            
+            # DETAIL만 매우 높은 유사도 (90% 이상)
+            elif detail_final >= 90 and detail_biz_name:
+                if detail_final > best_score:
+                    best_score = detail_final
+                    best_plan_id = plan_id
+                    best_reason = f"DETAIL고유사도({detail_final})"
 
-            # 종합 점수: BIZ(50%) + DETAIL(50%)
-            combined_score = int((biz_similarity + detail_similarity) / 2)
+        if best_plan_id and best_score >= threshold:
+            return (best_plan_id, best_score, best_reason)
 
-            if combined_score > best_score:
-                best_score = combined_score
-                best_plan_id = plan_id
-                best_reason = f"BIZ({biz_similarity})+DETAIL({detail_similarity})={combined_score}"
-
-        return (best_plan_id, best_score, best_reason)
+        return (None, 0, None)
 
 
     def __init__(self, json_path: str, output_dir: str, db_manager=None):
